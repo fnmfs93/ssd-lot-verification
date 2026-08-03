@@ -1,0 +1,8 @@
+.next
+node_modules
+.env
+.env.local
+dist
+*.log
+ssd-lot-verification-18bf9d0205b8.json
+replace-with-your-turso-url
