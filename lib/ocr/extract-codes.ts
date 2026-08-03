@@ -100,28 +100,43 @@ function extractCandidateCodes(texts: string[]) {
 
 async function prepareVariants(buffer: Buffer) {
   const base = sharp(buffer).rotate();
+  const trimmed = base
+    .clone()
+    .trim({ threshold: 12 })
+    .rotate();
 
-  return Promise.all([
-    base.clone().grayscale().normalize().sharpen().png().toBuffer(),
-    base
-      .clone()
-      .grayscale()
-      .normalize()
-      .resize({ width: 2400, withoutEnlargement: false })
-      .sharpen({ sigma: 1.4 })
-      .threshold(165)
-      .png()
-      .toBuffer(),
-    base
-      .clone()
-      .grayscale()
-      .normalize()
-      .resize({ width: 2800, withoutEnlargement: false })
-      .median(1)
-      .sharpen({ sigma: 1.2 })
-      .png()
-      .toBuffer(),
-  ]);
+  const pipelines = [
+    base.clone(),
+    base.clone().rotate(90),
+    base.clone().rotate(270),
+    trimmed.clone(),
+    trimmed.clone().rotate(90),
+    trimmed.clone().rotate(270),
+  ];
+
+  return Promise.all(
+    pipelines.flatMap((pipeline) => [
+      pipeline.clone().grayscale().normalize().sharpen().png().toBuffer(),
+      pipeline
+        .clone()
+        .grayscale()
+        .normalize()
+        .resize({ width: 2400, withoutEnlargement: false })
+        .sharpen({ sigma: 1.4 })
+        .threshold(165)
+        .png()
+        .toBuffer(),
+      pipeline
+        .clone()
+        .grayscale()
+        .normalize()
+        .resize({ width: 2800, withoutEnlargement: false })
+        .median(1)
+        .sharpen({ sigma: 1.2 })
+        .png()
+        .toBuffer(),
+    ]),
+  );
 }
 
 export async function extractCodesFromLabelBuffer(
