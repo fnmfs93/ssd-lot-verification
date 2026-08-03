@@ -62,6 +62,31 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const uniqueCodeCount = useMemo(() => session?.codes.length ?? 0, [session]);
 
   useEffect(() => {
+    const video =
+      cameraMode === "label" ? labelVideoRef.current : partVideoRef.current;
+
+    if (!isCameraOpen || !video || !streamRef.current) {
+      return;
+    }
+
+    video.srcObject = streamRef.current;
+    video.muted = true;
+    video.playsInline = true;
+
+    const playVideo = async () => {
+      try {
+        await video.play();
+      } catch {
+        setCameraError(
+          "Camera preview could not start on this device. Try reopening the camera or use file upload / scanner input instead.",
+        );
+      }
+    };
+
+    void playVideo();
+  }, [cameraMode, isCameraOpen]);
+
+  useEffect(() => {
     return () => {
       stopCamera();
 
@@ -113,18 +138,15 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: "environment",
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
         },
         audio: false,
       });
 
       stopCamera();
       streamRef.current = stream;
-
-      if (labelVideoRef.current) {
-        labelVideoRef.current.srcObject = stream;
-        await labelVideoRef.current.play();
-      }
 
       setIsCameraOpen(true);
       setCameraMode("label");
@@ -200,7 +222,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: "environment",
+          facingMode: { ideal: "environment" },
           width: { ideal: 1920 },
           height: { ideal: 1080 },
         },
@@ -209,11 +231,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
       stopCamera();
       streamRef.current = stream;
-
-      if (partVideoRef.current) {
-        partVideoRef.current.srcObject = stream;
-        await partVideoRef.current.play();
-      }
 
       setIsCameraOpen(true);
       setCameraMode("part");
