@@ -157,7 +157,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     if (shouldRotate) {
       context.translate(canvas.width / 2, canvas.height / 2);
-      context.rotate(Math.PI / 2);
+      context.rotate(-Math.PI / 2);
       context.drawImage(video, -sourceWidth / 2, -sourceHeight / 2, sourceWidth, sourceHeight);
     } else {
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
