@@ -7,3 +7,6 @@ dist
 ssd-lot-verification-18bf9d0205b8.json
 replace-with-your-turso-url
 ssd-lot-verification-*.json
+
+.vercel
+.env*
