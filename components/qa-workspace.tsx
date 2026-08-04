@@ -565,8 +565,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     muted
                     style={{
                       width: "100%",
-                      maxHeight: 300,
-                      objectFit: "cover",
+                      aspectRatio: "16 / 9",
+                      minHeight: 240,
+                      maxHeight: 360,
+                      objectFit: "contain",
                       borderRadius: 18,
                       background: "#000",
                     }}
@@ -678,8 +680,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     muted
                     style={{
                       width: "100%",
-                      maxHeight: 300,
-                      objectFit: "cover",
+                      aspectRatio: "16 / 9",
+                      minHeight: 240,
+                      maxHeight: 360,
+                      objectFit: "contain",
                       borderRadius: 18,
                       background: "#000",
                     }}
