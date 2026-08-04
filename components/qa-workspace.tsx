@@ -166,6 +166,74 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     return canvas;
   }
 
+  async function cropCanvasToContent(canvas: HTMLCanvasElement) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      return canvas;
+    }
+
+    const imageData = context.getImageData(0, 0, width, height);
+    const { data } = imageData;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = (y * width + x) * 4;
+        const red = data[index];
+        const green = data[index + 1];
+        const blue = data[index + 2];
+        const brightness = (red + green + blue) / 3;
+
+        if (brightness < 235) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (maxX < minX || maxY < minY) {
+      return canvas;
+    }
+
+    const padding = 24;
+    const cropX = Math.max(0, minX - padding);
+    const cropY = Math.max(0, minY - padding);
+    const cropWidth = Math.min(width - cropX, maxX - minX + 1 + padding * 2);
+    const cropHeight = Math.min(height - cropY, maxY - minY + 1 + padding * 2);
+    const croppedCanvas = document.createElement("canvas");
+
+    croppedCanvas.width = cropWidth;
+    croppedCanvas.height = cropHeight;
+
+    const croppedContext = croppedCanvas.getContext("2d");
+
+    if (!croppedContext) {
+      return canvas;
+    }
+
+    croppedContext.drawImage(
+      canvas,
+      cropX,
+      cropY,
+      cropWidth,
+      cropHeight,
+      0,
+      0,
+      cropWidth,
+      cropHeight,
+    );
+
+    return croppedCanvas;
+  }
+
   async function handleLogout() {
     stopCamera();
     await fetch("/api/auth/logout", { method: "POST" });
@@ -206,12 +274,14 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     }
 
     const video = labelVideoRef.current;
-    const canvas = await createLandscapeCapture(video);
+    const baseCanvas = await createLandscapeCapture(video);
 
-    if (!canvas) {
+    if (!baseCanvas) {
       setCameraError("Unable to capture the label image.");
       return;
     }
+
+    const canvas = await cropCanvasToContent(baseCanvas);
 
     const blob = await new Promise<Blob | null>((resolve) => {
       canvas.toBlob(resolve, "image/jpeg", 0.92);
