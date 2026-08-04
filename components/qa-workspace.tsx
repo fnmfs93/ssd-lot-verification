@@ -33,6 +33,10 @@ type SessionState = {
   ocrPreview: string;
 };
 
+function parseManualCodes(value: string) {
+  return [...new Set(value.toUpperCase().match(/\b[A-Z0-9]{11}\b/g) ?? [])];
+}
+
 export function QaWorkspace({ user }: { user: AuthUser }) {
   const router = useRouter();
   const labelVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -58,8 +62,14 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [partScanValue, setPartScanValue] = useState("");
   const [showCodes, setShowCodes] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [manualCodesInput, setManualCodesInput] = useState("");
+  const [failedOcrPreview, setFailedOcrPreview] = useState("");
 
   const uniqueCodeCount = useMemo(() => session?.codes.length ?? 0, [session]);
+  const manualCodeCount = useMemo(
+    () => parseManualCodes(manualCodesInput).length,
+    [manualCodesInput],
+  );
 
   useEffect(() => {
     const video =
@@ -384,6 +394,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   async function handleLabelSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setUploadError(null);
+    setFailedOcrPreview("");
     setLastResult(null);
     setHistory([]);
     setIsUploading(true);
@@ -409,6 +420,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       "sourceType",
       capturedLabelFile && selectedFile === capturedLabelFile ? "camera" : "upload",
     );
+    formData.set("manualCodes", manualCodesInput);
 
     const response = await fetch("/api/label-session", {
       method: "POST",
@@ -430,6 +442,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     if (!response.ok || !data?.sessionKey || !data.codes) {
       setUploadError(data?.error ?? "Label processing failed.");
+      setFailedOcrPreview(data?.ocrPreview ?? "");
       setStatus("Waiting for a clearer label upload.");
       return;
     }
@@ -444,6 +457,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setShowCodes(false);
     setShowHistory(false);
     setCapturedLabelFile(null);
+    setManualCodesInput("");
+    setFailedOcrPreview("");
     setCapturedPreviewUrl((current) => {
       if (current) {
         URL.revokeObjectURL(current);
@@ -557,6 +572,25 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                 <input id="file" name="file" type="file" accept="image/*" />
               </div>
 
+              <div className="field">
+                <label htmlFor="manualCodes">
+                  Manual label codes fallback (optional)
+                </label>
+                <textarea
+                  id="manualCodes"
+                  name="manualCodes"
+                  rows={4}
+                  placeholder="Paste 11-character codes here if OCR misses them, for example:&#10;J16262915HQ&#10;J16262915HZ&#10;J16262915HW"
+                  value={manualCodesInput}
+                  onChange={(event) => setManualCodesInput(event.target.value.toUpperCase())}
+                />
+                <small className="muted">
+                  {manualCodeCount
+                    ? `${manualCodeCount} manual code${manualCodeCount === 1 ? "" : "s"} ready as fallback`
+                    : "Leave blank to use OCR only."}
+                </small>
+              </div>
+
               <div className="button-row">
                 <button className="button" type="submit" disabled={isUploading}>
                   {isUploading ? "Processing label..." : "Process Label"}
@@ -565,6 +599,12 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
             </form>
 
             {uploadError ? <p className="error">{uploadError}</p> : null}
+            {failedOcrPreview ? (
+              <div className="notice" style={{ marginTop: 12 }}>
+                <strong>OCR preview</strong>
+                <div className="ocr-preview mono">{failedOcrPreview}</div>
+              </div>
+            ) : null}
             {cameraError ? <p className="error">{cameraError}</p> : null}
             <p className="muted">{status}</p>
 

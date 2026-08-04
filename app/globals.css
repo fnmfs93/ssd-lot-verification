@@ -149,6 +149,7 @@ video {
 .field input[type="email"],
 .field input[type="password"],
 .field input[type="text"],
+.field textarea,
 .field input[type="file"] {
   width: 100%;
   min-height: 52px;
@@ -161,7 +162,17 @@ video {
   outline: none;
 }
 
+.field textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
 .field input:focus {
+  border-color: rgba(31, 138, 70, 0.45);
+  box-shadow: 0 0 0 4px rgba(31, 138, 70, 0.12);
+}
+
+.field textarea:focus {
   border-color: rgba(31, 138, 70, 0.45);
   box-shadow: 0 0 0 4px rgba(31, 138, 70, 0.12);
 }
@@ -321,6 +332,14 @@ video {
   background: #eefaf0;
   border-radius: 16px;
   color: #336042;
+}
+
+.ocr-preview {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.9rem;
+  color: var(--ink);
 }
 
 .error {

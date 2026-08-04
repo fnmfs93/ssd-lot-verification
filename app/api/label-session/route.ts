@@ -7,6 +7,10 @@ import { storeLabelImage } from "@/lib/storage/google-drive";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+function parseManualCodes(value: string) {
+  return [...new Set(value.toUpperCase().match(/\b[A-Z0-9]{11}\b/g) ?? [])];
+}
+
 export async function POST(request: Request) {
   const user = await getCurrentUser();
 
@@ -18,6 +22,7 @@ export async function POST(request: Request) {
   const file = formData.get("file");
   const station = String(formData.get("station") ?? "").trim() || null;
   const sourceType = String(formData.get("sourceType") ?? "upload").trim();
+  const manualCodes = parseManualCodes(String(formData.get("manualCodes") ?? ""));
 
   if (!(file instanceof File)) {
     return NextResponse.json({ error: "Label image is required." }, { status: 400 });
@@ -38,12 +43,13 @@ export async function POST(request: Request) {
   });
 
   const extraction = await extractCodesFromLabelBuffer(buffer);
+  const finalCodes = extraction.codes.length ? extraction.codes : manualCodes;
 
-  if (!extraction.codes.length) {
+  if (!finalCodes.length) {
     return NextResponse.json(
       {
         error:
-          "No 11-character label codes were extracted. Try a clearer photo with less glare.",
+          "No 11-character label codes were extracted. Try a clearer photo, or paste the codes manually below the upload box.",
         ocrPreview: extraction.textPreview,
         imageRef: storedFile,
       },
@@ -57,13 +63,13 @@ export async function POST(request: Request) {
     qaStation: station,
     sourceType,
     imageRef: storedFile.fileRef,
-    extractedCodes: extraction.codes,
+    extractedCodes: finalCodes,
     rawOcrText: extraction.rawText,
   });
 
   return NextResponse.json({
     sessionKey: session.sessionKey,
-    codes: extraction.codes,
+    codes: finalCodes,
     imageRef: storedFile.fileRef,
     storageMode: storedFile.storageMode,
     ocrPreview: extraction.textPreview,
