@@ -114,8 +114,48 @@ async function prepareVariants(buffer: Buffer) {
     trimmed.clone().rotate(270),
   ];
 
+  const regionPipelines: Array<ReturnType<typeof sharp>> = [];
+
+  for (const pipeline of pipelines) {
+    const metadata = await pipeline.metadata();
+    const width = metadata.width ?? 0;
+    const height = metadata.height ?? 0;
+
+    if (!width || !height) {
+      continue;
+    }
+
+    const fullTableHeight = Math.max(1, Math.round(height * 0.42));
+    const codeColumnWidth = Math.max(1, Math.round(width * 0.34));
+    const upperLeftWidth = Math.max(1, Math.round(width * 0.52));
+    const upperLeftHeight = Math.max(1, Math.round(height * 0.45));
+
+    regionPipelines.push(
+      pipeline.clone().extract({
+        left: 0,
+        top: 0,
+        width,
+        height: fullTableHeight,
+      }),
+      pipeline.clone().extract({
+        left: 0,
+        top: 0,
+        width: codeColumnWidth,
+        height: fullTableHeight,
+      }),
+      pipeline.clone().extract({
+        left: 0,
+        top: 0,
+        width: upperLeftWidth,
+        height: upperLeftHeight,
+      }),
+    );
+  }
+
+  const allPipelines = [...pipelines, ...regionPipelines];
+
   return Promise.all(
-    pipelines.flatMap((pipeline) => [
+    allPipelines.flatMap((pipeline) => [
       pipeline.clone().grayscale().normalize().sharpen().png().toBuffer(),
       pipeline
         .clone()
