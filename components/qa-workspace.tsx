@@ -550,14 +550,9 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                   Open Camera
                 </button>
                 {isCameraOpen && cameraMode === "label" ? (
-                  <>
-                    <button className="button secondary" type="button" onClick={stopCamera}>
-                      Close Camera
-                    </button>
-                    <button className="button" type="button" onClick={handleCaptureLabel}>
-                      Capture Label
-                    </button>
-                  </>
+                  <button className="button secondary" type="button" onClick={stopCamera}>
+                    Close Camera
+                  </button>
                 ) : null}
               </div>
 
@@ -570,10 +565,17 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     muted
                     style={{
                       width: "100%",
+                      maxHeight: 300,
+                      objectFit: "cover",
                       borderRadius: 18,
                       background: "#000",
                     }}
                   />
+                  <div className="button-row" style={{ marginTop: 14 }}>
+                    <button className="button" type="button" onClick={handleCaptureLabel}>
+                      Capture Label
+                    </button>
+                  </div>
                 </div>
               ) : null}
 
@@ -676,6 +678,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     muted
                     style={{
                       width: "100%",
+                      maxHeight: 300,
+                      objectFit: "cover",
                       borderRadius: 18,
                       background: "#000",
                     }}
