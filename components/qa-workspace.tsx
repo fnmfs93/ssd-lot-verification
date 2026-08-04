@@ -135,6 +135,37 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setCameraMode(null);
   }
 
+  async function createLandscapeCapture(video: HTMLVideoElement) {
+    const sourceWidth = video.videoWidth || 1920;
+    const sourceHeight = video.videoHeight || 1080;
+    const shouldRotate = sourceHeight > sourceWidth;
+    const canvas = document.createElement("canvas");
+
+    if (shouldRotate) {
+      canvas.width = sourceHeight;
+      canvas.height = sourceWidth;
+    } else {
+      canvas.width = sourceWidth;
+      canvas.height = sourceHeight;
+    }
+
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      return null;
+    }
+
+    if (shouldRotate) {
+      context.translate(canvas.width / 2, canvas.height / 2);
+      context.rotate(Math.PI / 2);
+      context.drawImage(video, -sourceWidth / 2, -sourceHeight / 2, sourceWidth, sourceHeight);
+    } else {
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    }
+
+    return canvas;
+  }
+
   async function handleLogout() {
     stopCamera();
     await fetch("/api/auth/logout", { method: "POST" });
@@ -175,18 +206,12 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     }
 
     const video = labelVideoRef.current;
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth || 1920;
-    canvas.height = video.videoHeight || 1080;
+    const canvas = await createLandscapeCapture(video);
 
-    const context = canvas.getContext("2d");
-
-    if (!context) {
+    if (!canvas) {
       setCameraError("Unable to capture the label image.");
       return;
     }
-
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     const blob = await new Promise<Blob | null>((resolve) => {
       canvas.toBlob(resolve, "image/jpeg", 0.92);
@@ -210,7 +235,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       return URL.createObjectURL(file);
     });
     stopCamera();
-    setStatus("Label captured. Submit it to extract the codes.");
+    setStatus("Label captured in landscape. Submit it to extract the codes.");
   }
 
   async function handleStartPartCamera() {
