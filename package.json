@@ -9,7 +9,8 @@
     "lint": "next lint",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
-    "hash-password": "node scripts/hash-password.mjs"
+    "hash-password": "node scripts/hash-password.mjs",
+    "drive:auth": "node scripts/get-drive-refresh-token.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",

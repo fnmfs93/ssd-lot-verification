@@ -26,11 +26,12 @@ export async function storeLabelImage(
   const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
   const accessToken =
     process.env.GOOGLE_DRIVE_ACCESS_TOKEN ??
+    (await getOAuthAccessToken().catch(() => null)) ??
     (await getServiceAccountAccessToken().catch(() => null));
 
   if (!folderId || !accessToken) {
     throw new Error(
-      "Google Drive mode is enabled, but GOOGLE_DRIVE_FOLDER_ID and either a direct access token or service account credentials are required.",
+      "Google Drive mode is enabled, but GOOGLE_DRIVE_FOLDER_ID and either a direct access token, OAuth refresh token, or service account credentials are required.",
     );
   }
 
@@ -132,6 +133,42 @@ async function getServiceAccountAccessToken() {
   }
 
   return payloadJson.access_token;
+}
+
+async function getOAuthAccessToken() {
+  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_DRIVE_REFRESH_TOKEN;
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    return null;
+  }
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(`Google OAuth token refresh failed: ${message}`);
+  }
+
+  const payload = (await response.json()) as { access_token?: string };
+
+  if (!payload.access_token) {
+    throw new Error("Google OAuth token refresh returned no access token.");
+  }
+
+  return payload.access_token;
 }
 
 function base64UrlEncode(value: string) {
