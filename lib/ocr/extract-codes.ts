@@ -98,14 +98,11 @@ function extractCandidateCodes(texts: string[]) {
     .map(([value]) => value);
 }
 
-async function prepareVariants(buffer: Buffer) {
+function buildBasePipelines(buffer: Buffer) {
   const base = sharp(buffer).rotate();
-  const trimmed = base
-    .clone()
-    .trim({ threshold: 12 })
-    .rotate();
+  const trimmed = base.clone().trim({ threshold: 12 }).rotate();
 
-  const pipelines = [
+  return [
     base.clone(),
     base.clone().rotate(90),
     base.clone().rotate(270),
@@ -113,7 +110,9 @@ async function prepareVariants(buffer: Buffer) {
     trimmed.clone().rotate(90),
     trimmed.clone().rotate(270),
   ];
+}
 
+async function buildRegionPipelines(pipelines: Array<ReturnType<typeof sharp>>) {
   const regionPipelines: Array<ReturnType<typeof sharp>> = [];
 
   for (const pipeline of pipelines) {
@@ -152,47 +151,83 @@ async function prepareVariants(buffer: Buffer) {
     );
   }
 
-  const allPipelines = [...pipelines, ...regionPipelines];
+  return regionPipelines;
+}
 
-  return Promise.all(
-    allPipelines.flatMap((pipeline) => [
-      pipeline.clone().grayscale().normalize().sharpen().png().toBuffer(),
-      pipeline
-        .clone()
-        .grayscale()
-        .normalize()
-        .resize({ width: 2400, withoutEnlargement: false })
-        .sharpen({ sigma: 1.4 })
-        .threshold(165)
-        .png()
-        .toBuffer(),
-      pipeline
-        .clone()
-        .grayscale()
-        .normalize()
-        .resize({ width: 2800, withoutEnlargement: false })
-        .median(1)
-        .sharpen({ sigma: 1.2 })
-        .png()
-        .toBuffer(),
-    ]),
-  );
+function fastVariantBuffers(pipeline: ReturnType<typeof sharp>) {
+  return [
+    pipeline.clone().grayscale().normalize().sharpen().png().toBuffer(),
+    pipeline
+      .clone()
+      .grayscale()
+      .normalize()
+      .resize({ width: 2400, withoutEnlargement: false })
+      .sharpen({ sigma: 1.4 })
+      .threshold(165)
+      .png()
+      .toBuffer(),
+  ];
+}
+
+function extraVariantBuffer(pipeline: ReturnType<typeof sharp>) {
+  return pipeline
+    .clone()
+    .grayscale()
+    .normalize()
+    .resize({ width: 2800, withoutEnlargement: false })
+    .median(1)
+    .sharpen({ sigma: 1.2 })
+    .png()
+    .toBuffer();
+}
+
+async function recognizeAll(buffers: Buffer[]) {
+  const worker = await getWorker();
+  const texts: string[] = [];
+
+  for (const buffer of buffers) {
+    const result = await worker.recognize(buffer);
+    texts.push(result.data.text ?? "");
+  }
+
+  return texts;
 }
 
 export async function extractCodesFromLabelBuffer(
   buffer: Buffer,
 ): Promise<ExtractionResult> {
-  const preparedVariants = await prepareVariants(buffer);
-  const worker = await getWorker();
-  const texts: string[] = [];
+  const basePipelines = buildBasePipelines(buffer);
 
-  for (const prepared of preparedVariants) {
-    const result = await worker.recognize(prepared);
-    texts.push(result.data.text ?? "");
+  // Fast pass: the 6 whole-image orientations only, 2 processing variants each
+  // (12 OCR passes). This covers the common case of a clear, well-cropped photo
+  // without paying for the full region-crop combinatorial search below, which
+  // was slow enough to time out the serverless function on every request.
+  const fastBuffers = (
+    await Promise.all(basePipelines.map((pipeline) => Promise.all(fastVariantBuffers(pipeline))))
+  ).flat();
+
+  const texts = await recognizeAll(fastBuffers);
+  let codes = extractCandidateCodes(texts);
+
+  if (!codes.length) {
+    // Slow fallback for hard images: add cropped table/column regions and a
+    // third denoising variant across every pipeline, same coverage as before.
+    const regionPipelines = await buildRegionPipelines(basePipelines);
+    const allPipelines = [...basePipelines, ...regionPipelines];
+
+    const remainingBuffers = (
+      await Promise.all([
+        ...regionPipelines.map((pipeline) => Promise.all(fastVariantBuffers(pipeline))),
+        ...allPipelines.map((pipeline) => extraVariantBuffer(pipeline).then((buf) => [buf])),
+      ])
+    ).flat();
+
+    const moreTexts = await recognizeAll(remainingBuffers);
+    texts.push(...moreTexts);
+    codes = extractCandidateCodes(texts);
   }
 
   const rawText = texts.join("\n\n--- OCR PASS ---\n\n");
-  const codes = extractCandidateCodes(texts);
 
   return {
     codes,

@@ -36,42 +36,53 @@ export async function POST(request: Request) {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const storedFile = await storeLabelImage({
-    fileName: file.name,
-    mimeType: file.type,
-    buffer,
-  });
 
-  const extraction = await extractCodesFromLabelBuffer(buffer);
-  const finalCodes = extraction.codes.length ? extraction.codes : manualCodes;
+  try {
+    const storedFile = await storeLabelImage({
+      fileName: file.name,
+      mimeType: file.type,
+      buffer,
+    });
 
-  if (!finalCodes.length) {
+    const extraction = await extractCodesFromLabelBuffer(buffer);
+    const finalCodes = extraction.codes.length ? extraction.codes : manualCodes;
+
+    if (!finalCodes.length) {
+      return NextResponse.json(
+        {
+          error:
+            "No 11-character label codes were extracted. Try a clearer photo, or paste the codes manually below the upload box.",
+          ocrPreview: extraction.textPreview,
+          imageRef: storedFile,
+        },
+        { status: 422 },
+      );
+    }
+
+    const session = await createLabelSession({
+      qaUserId: user.id,
+      qaUserName: user.name,
+      qaStation: station,
+      sourceType,
+      imageRef: storedFile.fileRef,
+      extractedCodes: finalCodes,
+      rawOcrText: extraction.rawText,
+    });
+
+    return NextResponse.json({
+      sessionKey: session.sessionKey,
+      codes: finalCodes,
+      imageRef: storedFile.fileRef,
+      storageMode: storedFile.storageMode,
+      ocrPreview: extraction.textPreview,
+    });
+  } catch (error) {
+    console.error("label-session processing failed", error);
     return NextResponse.json(
       {
-        error:
-          "No 11-character label codes were extracted. Try a clearer photo, or paste the codes manually below the upload box.",
-        ocrPreview: extraction.textPreview,
-        imageRef: storedFile,
+        error: error instanceof Error ? error.message : "Label processing failed.",
       },
-      { status: 422 },
+      { status: 500 },
     );
   }
-
-  const session = await createLabelSession({
-    qaUserId: user.id,
-    qaUserName: user.name,
-    qaStation: station,
-    sourceType,
-    imageRef: storedFile.fileRef,
-    extractedCodes: finalCodes,
-    rawOcrText: extraction.rawText,
-  });
-
-  return NextResponse.json({
-    sessionKey: session.sessionKey,
-    codes: finalCodes,
-    imageRef: storedFile.fileRef,
-    storageMode: storedFile.storageMode,
-    ocrPreview: extraction.textPreview,
-  });
 }
