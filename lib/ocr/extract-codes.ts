@@ -154,6 +154,23 @@ async function buildRegionPipelines(pipelines: Array<ReturnType<typeof sharp>>) 
   return regionPipelines;
 }
 
+async function buildLeftColumnPipeline(pipeline: ReturnType<typeof sharp>) {
+  const metadata = await pipeline.metadata();
+  const width = metadata.width ?? 0;
+  const height = metadata.height ?? 0;
+
+  if (!width || !height) {
+    return null;
+  }
+
+  return pipeline.clone().extract({
+    left: 0,
+    top: 0,
+    width: Math.max(1, Math.round(width * 0.4)),
+    height,
+  });
+}
+
 function fastVariantBuffers(pipeline: ReturnType<typeof sharp>) {
   return [
     pipeline.clone().grayscale().normalize().sharpen().png().toBuffer(),
@@ -197,17 +214,33 @@ export async function extractCodesFromLabelBuffer(
   buffer: Buffer,
 ): Promise<ExtractionResult> {
   const basePipelines = buildBasePipelines(buffer);
+  const texts: string[] = [];
 
-  // Fast pass: the 6 whole-image orientations only, 2 processing variants each
-  // (12 OCR passes). This covers the common case of a clear, well-cropped photo
-  // without paying for the full region-crop combinatorial search below, which
-  // was slow enough to time out the serverless function on every request.
-  const fastBuffers = (
-    await Promise.all(basePipelines.map((pipeline) => Promise.all(fastVariantBuffers(pipeline))))
-  ).flat();
+  // Tier 0: these labels always print the 11-character code in the left
+  // ~40% of the frame, so try a straight crop to just that strip first — 2
+  // OCR passes on the upright orientation, no rotation search needed.
+  const leftColumnPipeline = await buildLeftColumnPipeline(basePipelines[0]);
 
-  const texts = await recognizeAll(fastBuffers);
+  if (leftColumnPipeline) {
+    const leftColumnBuffers = await Promise.all(fastVariantBuffers(leftColumnPipeline));
+    texts.push(...(await recognizeAll(leftColumnBuffers)));
+  }
+
   let codes = extractCandidateCodes(texts);
+
+  if (!codes.length) {
+    // Fast pass: the 6 whole-image orientations, 2 processing variants each
+    // (12 OCR passes). This covers a clear, well-cropped photo that wasn't
+    // caught by the left-column crop above (e.g. rotated capture) without
+    // paying for the full region-crop combinatorial search below, which was
+    // slow enough to time out the serverless function on every request.
+    const fastBuffers = (
+      await Promise.all(basePipelines.map((pipeline) => Promise.all(fastVariantBuffers(pipeline))))
+    ).flat();
+
+    texts.push(...(await recognizeAll(fastBuffers)));
+    codes = extractCandidateCodes(texts);
+  }
 
   if (!codes.length) {
     // Slow fallback for hard images: add cropped table/column regions and a
