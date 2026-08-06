@@ -52,7 +52,7 @@ function collectLineNormalizedMatches(text: string) {
 // alphanumeric suffix — e.g. J16262914IP. Locking to this exact shape
 // rejects OCR noise from body text far more reliably than a generic
 // "11 alphanumeric characters" check.
-const CODE_PATTERN = /^J\d{6}[A-Z0-9]{4}$/;
+const CODE_PATTERN = /^J\d{8}[A-Z0-9]{2}$/;
 
 function looksLikeCode(value: string) {
   return CODE_PATTERN.test(value);
@@ -128,9 +128,11 @@ async function buildRegionPipelines(pipelines: Array<ReturnType<typeof sharp>>) 
     }
 
     const fullTableHeight = Math.max(1, Math.round(height * 0.42));
-    const codeColumnWidth = Math.max(1, Math.round(width * 0.34));
-    const upperLeftWidth = Math.max(1, Math.round(width * 0.52));
-    const upperLeftHeight = Math.max(1, Math.round(height * 0.45));
+    const codeColumnWidth = Math.max(1, Math.round(width * 0.28));
+    const upperLeftWidth = Math.max(1, Math.round(width * 0.42));
+    const upperLeftHeight = Math.max(1, Math.round(height * 0.42));
+    const rowSectionTop = Math.max(0, Math.round(height * 0.14));
+    const rowSectionHeight = Math.max(1, Math.round(height * 0.22));
 
     regionPipelines.push(
       pipeline.clone().extract({
@@ -151,27 +153,46 @@ async function buildRegionPipelines(pipelines: Array<ReturnType<typeof sharp>>) 
         width: upperLeftWidth,
         height: upperLeftHeight,
       }),
+      pipeline.clone().extract({
+        left: 0,
+        top: rowSectionTop,
+        width: codeColumnWidth,
+        height: rowSectionHeight,
+      }),
     );
   }
 
   return regionPipelines;
 }
 
-async function buildLeftColumnPipeline(pipeline: ReturnType<typeof sharp>) {
+async function buildLeftColumnPipelines(pipeline: ReturnType<typeof sharp>) {
   const metadata = await pipeline.metadata();
   const width = metadata.width ?? 0;
   const height = metadata.height ?? 0;
 
   if (!width || !height) {
-    return null;
+    return [];
   }
 
-  return pipeline.clone().extract({
-    left: 0,
-    top: 0,
-    width: Math.max(1, Math.round(width * 0.4)),
-    height,
-  });
+  const leftWidth = Math.max(1, Math.round(width * 0.28));
+  const upperHeight = Math.max(1, Math.round(height * 0.42));
+  const rowSectionTop = Math.max(0, Math.round(height * 0.14));
+  const rowSectionHeight = Math.max(1, Math.round(height * 0.22));
+
+  return [
+    pipeline.clone().extract({
+      left: 0,
+      top: 0,
+      width: leftWidth,
+      height: upperHeight,
+    }),
+    pipeline.clone().extract({
+      left: 0,
+      top: rowSectionTop,
+      width: leftWidth,
+      height: rowSectionHeight,
+    }),
+  ];
 }
 
 function fastVariantBuffers(pipeline: ReturnType<typeof sharp>) {
@@ -219,26 +240,23 @@ export async function extractCodesFromLabelBuffer(
   const basePipelines = buildBasePipelines(buffer);
   const texts: string[] = [];
 
-  // Tier 0: these labels always print the 11-character code in the left
-  // ~40% of the frame, so try a straight crop to just that strip first — 2
-  // OCR passes on the upright orientation, no rotation search needed.
-  const leftColumnPipeline = await buildLeftColumnPipeline(basePipelines[0]);
-
-  if (leftColumnPipeline) {
-    const leftColumnBuffers = await Promise.all(fastVariantBuffers(leftColumnPipeline));
-    texts.push(...(await recognizeAll(leftColumnBuffers)));
-  }
+  // Tier 0: start with just the upper-left code section, which is where the
+  // three target values always live.
+  const leftColumnPipelines = await buildLeftColumnPipelines(basePipelines[0]);
+  const leftColumnBuffers = (
+    await Promise.all(
+      leftColumnPipelines.map((pipeline) => Promise.all(fastVariantBuffers(pipeline))),
+    )
+  ).flat();
+  texts.push(...(await recognizeAll(leftColumnBuffers)));
 
   let codes = extractCandidateCodes(texts);
 
   if (!codes.length) {
-    // Fast pass: the 6 whole-image orientations, 2 processing variants each
-    // (12 OCR passes). This covers a clear, well-cropped photo that wasn't
-    // caught by the left-column crop above (e.g. rotated capture) without
-    // paying for the full region-crop combinatorial search below, which was
-    // slow enough to time out the serverless function on every request.
+    // Fast pass: only the most likely orientations to keep cycle time down.
+    const fastPipelines = [basePipelines[0], basePipelines[2], basePipelines[3]];
     const fastBuffers = (
-      await Promise.all(basePipelines.map((pipeline) => Promise.all(fastVariantBuffers(pipeline))))
+      await Promise.all(fastPipelines.map((pipeline) => Promise.all(fastVariantBuffers(pipeline))))
     ).flat();
 
     texts.push(...(await recognizeAll(fastBuffers)));
@@ -246,10 +264,11 @@ export async function extractCodesFromLabelBuffer(
   }
 
   if (!codes.length) {
-    // Slow fallback for hard images: add cropped table/column regions and a
-    // third denoising variant across every pipeline, same coverage as before.
-    const regionPipelines = await buildRegionPipelines(basePipelines);
-    const allPipelines = [...basePipelines, ...regionPipelines];
+    // Hard-image fallback: focused table regions plus one heavier denoise
+    // variant, but still limited to the most likely orientations.
+    const fallbackBases = [basePipelines[0], basePipelines[2], basePipelines[3]];
+    const regionPipelines = await buildRegionPipelines(fallbackBases);
+    const allPipelines = [...fallbackBases, ...regionPipelines];
 
     const remainingBuffers = (
       await Promise.all([
