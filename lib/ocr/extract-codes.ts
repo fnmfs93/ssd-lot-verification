@@ -48,29 +48,14 @@ function collectLineNormalizedMatches(text: string) {
   return matches;
 }
 
+// Real codes always follow J + MMYYDD (6 digits) + a 4-character
+// alphanumeric suffix — e.g. J16262914IP. Locking to this exact shape
+// rejects OCR noise from body text far more reliably than a generic
+// "11 alphanumeric characters" check.
+const CODE_PATTERN = /^J\d{6}[A-Z0-9]{4}$/;
+
 function looksLikeCode(value: string) {
-  // Real codes are alphanumeric with at least one letter and one digit.
-  // Rejects pure-letter or pure-digit 11-char runs, which are almost always
-  // OCR noise from body text rather than an actual label code.
-  return /[A-Z]/.test(value) && /\d/.test(value);
-}
-
-function scoreCandidate(value: string) {
-  let score = 0;
-
-  if (/^[A-Z]/.test(value)) {
-    score += 3;
-  }
-
-  if (/\d/.test(value)) {
-    score += 2;
-  }
-
-  if (/^[A-Z]\d{5,}/.test(value)) {
-    score += 3;
-  }
-
-  return score;
+  return CODE_PATTERN.test(value);
 }
 
 function extractCandidateCodes(texts: string[]) {
@@ -109,12 +94,6 @@ function extractCandidateCodes(texts: string[]) {
 
       if (countDelta !== 0) {
         return countDelta;
-      }
-
-      const scoreDelta = scoreCandidate(right[0]) - scoreCandidate(left[0]);
-
-      if (scoreDelta !== 0) {
-        return scoreDelta;
       }
 
       return left[0].localeCompare(right[0]);
