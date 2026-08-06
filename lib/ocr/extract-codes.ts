@@ -27,7 +27,12 @@ function collectLineNormalizedMatches(text: string) {
   for (const rawLine of text.toUpperCase().split(/\r?\n/)) {
     const compact = rawLine.replace(/[^A-Z0-9]/g, "");
 
-    if (compact.length < 11) {
+    // Only trust normalization on lines that are already close to code-length
+    // (a code with a stray space/hyphen OCR'd into the middle of it). Sliding
+    // an 11-char window across long header/timestamp lines produces dozens of
+    // overlapping, meaningless substrings — e.g. a compacted 40-character
+    // sentence yields ~30 spurious "candidates" shifted by one character each.
+    if (compact.length < 11 || compact.length > 15) {
       continue;
     }
 
@@ -41,6 +46,13 @@ function collectLineNormalizedMatches(text: string) {
   }
 
   return matches;
+}
+
+function looksLikeCode(value: string) {
+  // Real codes are alphanumeric with at least one letter and one digit.
+  // Rejects pure-letter or pure-digit 11-char runs, which are almost always
+  // OCR noise from body text rather than an actual label code.
+  return /[A-Z]/.test(value) && /\d/.test(value);
 }
 
 function scoreCandidate(value: string) {
@@ -58,24 +70,36 @@ function scoreCandidate(value: string) {
     score += 3;
   }
 
-  if (/^[A-Z0-9]{11}$/.test(value)) {
-    score += 1;
-  }
-
   return score;
 }
 
 function extractCandidateCodes(texts: string[]) {
-  const counts = new Map<string, number>();
+  const directCounts = new Map<string, number>();
+  const normalizedCounts = new Map<string, number>();
 
   for (const text of texts) {
-    const candidates = [
-      ...collectDirectMatches(text),
-      ...collectLineNormalizedMatches(text),
-    ];
+    for (const candidate of collectDirectMatches(text)) {
+      if (looksLikeCode(candidate)) {
+        directCounts.set(candidate, (directCounts.get(candidate) ?? 0) + 1);
+      }
+    }
 
-    for (const candidate of candidates) {
-      counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+    for (const candidate of collectLineNormalizedMatches(text)) {
+      if (looksLikeCode(candidate)) {
+        normalizedCounts.set(candidate, (normalizedCounts.get(candidate) ?? 0) + 1);
+      }
+    }
+  }
+
+  const counts = new Map<string, number>(directCounts);
+
+  for (const [value, count] of normalizedCounts) {
+    // A direct bounded-token read is trustworthy on its own. A
+    // sliding-window normalized match is easy to produce by chance from
+    // unrelated text, so only accept it once it's corroborated — either a
+    // direct match also saw it, or it showed up in at least two passes.
+    if (count >= 2 || counts.has(value)) {
+      counts.set(value, (counts.get(value) ?? 0) + count);
     }
   }
 
