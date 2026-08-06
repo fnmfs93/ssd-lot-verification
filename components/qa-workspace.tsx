@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import jsQR from "jsqr";
 import type { AuthUser } from "@/lib/auth/session";
 
 type BarcodeDetectorLike = {
@@ -317,13 +318,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setCameraError(null);
     setVerifyError(null);
 
-    if (!window.BarcodeDetector) {
-      setCameraError(
-        "This browser does not support live barcode detection. Use scanner gun or manual entry on this device.",
-      );
-      return;
-    }
-
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -343,7 +337,39 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
         "Part camera ready. Move very close to the QR and keep steady. Small 2mm codes may still be unreliable on some phones.",
       );
 
-      const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+      // Prefer the native Shape Detection API where available (Chrome/Edge on
+      // Android); fall back to jsQR's canvas-based decoder for browsers that
+      // don't ship it at all, e.g. Safari/iOS.
+      const nativeDetector = window.BarcodeDetector
+        ? new window.BarcodeDetector({ formats: ["qr_code"] })
+        : null;
+      const scanCanvas = document.createElement("canvas");
+      const scanContext = scanCanvas.getContext("2d", { willReadFrequently: true });
+
+      const detectQrValue = async (video: HTMLVideoElement) => {
+        if (nativeDetector) {
+          const barcodes = await nativeDetector.detect(video);
+          return barcodes.find((item) => item.rawValue?.trim())?.rawValue ?? null;
+        }
+
+        if (!scanContext || !video.videoWidth || !video.videoHeight) {
+          return null;
+        }
+
+        const maxDimension = 720;
+        const scale = Math.min(1, maxDimension / Math.max(video.videoWidth, video.videoHeight));
+        const width = Math.max(1, Math.round(video.videoWidth * scale));
+        const height = Math.max(1, Math.round(video.videoHeight * scale));
+
+        scanCanvas.width = width;
+        scanCanvas.height = height;
+        scanContext.drawImage(video, 0, 0, width, height);
+
+        const imageData = scanContext.getImageData(0, 0, width, height);
+        const result = jsQR(imageData.data, width, height, { inversionAttempts: "attemptBoth" });
+
+        return result?.data ?? null;
+      };
 
       const scanFrame = async () => {
         const video = partVideoRef.current;
@@ -354,11 +380,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
         }
 
         try {
-          const barcodes = await detector.detect(video);
-          const match = barcodes.find((item) => item.rawValue?.trim());
+          const rawValue = await detectQrValue(video);
 
-          if (match?.rawValue) {
-            const detectedValue = match.rawValue.trim().toUpperCase();
+          if (rawValue?.trim()) {
+            const detectedValue = rawValue.trim().toUpperCase();
             setPartScanValue(detectedValue);
             stopCamera();
             setStatus("QR detected. Verifying automatically...");
