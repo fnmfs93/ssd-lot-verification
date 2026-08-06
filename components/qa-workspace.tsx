@@ -65,8 +65,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [showHistory, setShowHistory] = useState(false);
   const [manualCodesInput, setManualCodesInput] = useState("");
   const [failedOcrPreview, setFailedOcrPreview] = useState("");
-  const [labelVideoIsPortrait, setLabelVideoIsPortrait] = useState(false);
-  const [labelVideoAspectRatio, setLabelVideoAspectRatio] = useState(16 / 9);
 
   const uniqueCodeCount = useMemo(() => session?.codes.length ?? 0, [session]);
   const manualCodeCount = useMemo(
@@ -136,8 +134,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     setIsCameraOpen(false);
     setCameraMode(null);
-    setLabelVideoIsPortrait(false);
-    setLabelVideoAspectRatio(16 / 9);
   }
 
   async function createLandscapeCapture(video: HTMLVideoElement) {
@@ -265,7 +261,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       setIsCameraOpen(true);
       setCameraMode("label");
       setStatus(
-        "Camera ready. Line up the 2D Code column inside the guide box, then capture.",
+        "Camera ready. Keep the phone upright, place the full label inside the wide guide box, then capture.",
       );
     } catch {
       setCameraError(
@@ -660,11 +656,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
               {isCameraOpen && cameraMode === "label" ? (
                 <div className="card" style={{ marginBottom: 16, padding: 16 }}>
                   <div
+                    className="label-camera-frame"
                     style={{
                       position: "relative",
                       width: "100%",
-                      aspectRatio: String(labelVideoAspectRatio),
-                      maxHeight: labelVideoIsPortrait ? 520 : 380,
                       borderRadius: 18,
                       overflow: "hidden",
                       background: "#000",
@@ -675,14 +670,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       autoPlay
                       playsInline
                       muted
-                      onLoadedMetadata={(event) => {
-                        const target = event.currentTarget;
-
-                        if (target.videoWidth && target.videoHeight) {
-                          setLabelVideoAspectRatio(target.videoWidth / target.videoHeight);
-                          setLabelVideoIsPortrait(target.videoHeight > target.videoWidth);
-                        }
-                      }}
+                      className="label-camera-video"
                       style={{
                         width: "100%",
                         height: "100%",
@@ -690,12 +678,14 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       }}
                     />
                     <div
+                      className="label-camera-guide"
                       style={{
                         position: "absolute",
-                        left: 0,
-                        top: 0,
-                        width: labelVideoIsPortrait ? "100%" : "42%",
-                        height: labelVideoIsPortrait ? "42%" : "100%",
+                        left: "50%",
+                        top: "50%",
+                        width: "88%",
+                        height: "40%",
+                        transform: "translate(-50%, -50%)",
                         border: "3px dashed #4ade80",
                         borderRadius: 12,
                         boxSizing: "border-box",
@@ -703,6 +693,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       }}
                     />
                     <div
+                      className="label-camera-hint"
                       style={{
                         position: "absolute",
                         left: 8,
@@ -718,7 +709,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                         pointerEvents: "none",
                       }}
                     >
-                      Align the 2D Code column inside the dashed box
+                      Keep phone upright. Fit the full label inside the dashed box.
                     </div>
                   </div>
                   <div className="button-row" style={{ marginTop: 14 }}>

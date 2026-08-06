@@ -370,6 +370,25 @@ video {
   border: 1px solid var(--line);
 }
 
+.label-camera-frame {
+  min-height: 420px;
+  max-height: 72vh;
+}
+
+.label-camera-video {
+  object-position: center center;
+}
+
+.label-camera-guide {
+  box-shadow:
+    0 0 0 9999px rgba(0, 0, 0, 0.26),
+    0 0 0 1px rgba(255, 255, 255, 0.16) inset;
+}
+
+.label-camera-hint {
+  font-weight: 600;
+}
+
 .mobile-step {
   display: inline-flex;
   align-items: center;
@@ -495,5 +514,10 @@ video {
 
   .camera-preview {
     max-height: 340px;
+  }
+
+  .label-camera-frame {
+    min-height: 480px;
+    max-height: 76vh;
   }
 }
