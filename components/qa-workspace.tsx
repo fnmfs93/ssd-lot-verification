@@ -65,6 +65,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [showHistory, setShowHistory] = useState(false);
   const [manualCodesInput, setManualCodesInput] = useState("");
   const [failedOcrPreview, setFailedOcrPreview] = useState("");
+  const [labelVideoIsPortrait, setLabelVideoIsPortrait] = useState(false);
+  const [labelVideoAspectRatio, setLabelVideoAspectRatio] = useState(16 / 9);
 
   const uniqueCodeCount = useMemo(() => session?.codes.length ?? 0, [session]);
   const manualCodeCount = useMemo(
@@ -134,6 +136,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     setIsCameraOpen(false);
     setCameraMode(null);
+    setLabelVideoIsPortrait(false);
+    setLabelVideoAspectRatio(16 / 9);
   }
 
   async function createLandscapeCapture(video: HTMLVideoElement) {
@@ -260,7 +264,9 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
       setIsCameraOpen(true);
       setCameraMode("label");
-      setStatus("Camera ready. Frame the A4 label and capture it.");
+      setStatus(
+        "Camera ready. Line up the 2D Code column inside the guide box, then capture.",
+      );
     } catch {
       setCameraError(
         "Camera access failed. Check browser permissions or use file upload instead.",
@@ -653,21 +659,68 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
               {isCameraOpen && cameraMode === "label" ? (
                 <div className="card" style={{ marginBottom: 16, padding: 16 }}>
-                  <video
-                    ref={labelVideoRef}
-                    autoPlay
-                    playsInline
-                    muted
+                  <div
                     style={{
+                      position: "relative",
                       width: "100%",
-                      aspectRatio: "16 / 9",
-                      minHeight: 240,
-                      maxHeight: 360,
-                      objectFit: "contain",
+                      aspectRatio: String(labelVideoAspectRatio),
+                      maxHeight: labelVideoIsPortrait ? 520 : 380,
                       borderRadius: 18,
+                      overflow: "hidden",
                       background: "#000",
                     }}
-                  />
+                  >
+                    <video
+                      ref={labelVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      onLoadedMetadata={(event) => {
+                        const target = event.currentTarget;
+
+                        if (target.videoWidth && target.videoHeight) {
+                          setLabelVideoAspectRatio(target.videoWidth / target.videoHeight);
+                          setLabelVideoIsPortrait(target.videoHeight > target.videoWidth);
+                        }
+                      }}
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                      }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 0,
+                        top: 0,
+                        width: labelVideoIsPortrait ? "100%" : "42%",
+                        height: labelVideoIsPortrait ? "42%" : "100%",
+                        border: "3px dashed #4ade80",
+                        borderRadius: 12,
+                        boxSizing: "border-box",
+                        pointerEvents: "none",
+                      }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 8,
+                        right: 8,
+                        bottom: 8,
+                        color: "#fff",
+                        background: "rgba(0, 0, 0, 0.6)",
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        fontSize: 12,
+                        lineHeight: 1.3,
+                        textAlign: "center",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      Align the 2D Code column inside the dashed box
+                    </div>
+                  </div>
                   <div className="button-row" style={{ marginTop: 14 }}>
                     <button className="button" type="button" onClick={handleCaptureLabel}>
                       Capture Label
