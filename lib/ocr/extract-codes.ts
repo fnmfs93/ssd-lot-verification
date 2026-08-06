@@ -115,6 +115,33 @@ function buildBasePipelines(buffer: Buffer) {
   ];
 }
 
+function safeExtract(
+  pipeline: ReturnType<typeof sharp>,
+  input: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  },
+  bounds: {
+    width: number;
+    height: number;
+  },
+) {
+  const left = Math.max(0, Math.min(bounds.width - 1, Math.floor(input.left)));
+  const top = Math.max(0, Math.min(bounds.height - 1, Math.floor(input.top)));
+  const maxWidth = bounds.width - left;
+  const maxHeight = bounds.height - top;
+  const width = Math.max(1, Math.min(maxWidth, Math.floor(input.width)));
+  const height = Math.max(1, Math.min(maxHeight, Math.floor(input.height)));
+
+  if (maxWidth <= 0 || maxHeight <= 0) {
+    return null;
+  }
+
+  return pipeline.clone().extract({ left, top, width, height });
+}
+
 async function buildRegionPipelines(pipelines: Array<ReturnType<typeof sharp>>) {
   const regionPipelines: Array<ReturnType<typeof sharp>> = [];
 
@@ -133,33 +160,51 @@ async function buildRegionPipelines(pipelines: Array<ReturnType<typeof sharp>>) 
     const upperLeftHeight = Math.max(1, Math.round(height * 0.42));
     const rowSectionTop = Math.max(0, Math.round(height * 0.14));
     const rowSectionHeight = Math.max(1, Math.round(height * 0.22));
+    const bounds = { width, height };
+    const extracts = [
+      safeExtract(
+        pipeline,
+        {
+          left: 0,
+          top: 0,
+          width,
+          height: fullTableHeight,
+        },
+        bounds,
+      ),
+      safeExtract(
+        pipeline,
+        {
+          left: 0,
+          top: 0,
+          width: codeColumnWidth,
+          height: fullTableHeight,
+        },
+        bounds,
+      ),
+      safeExtract(
+        pipeline,
+        {
+          left: 0,
+          top: 0,
+          width: upperLeftWidth,
+          height: upperLeftHeight,
+        },
+        bounds,
+      ),
+      safeExtract(
+        pipeline,
+        {
+          left: 0,
+          top: rowSectionTop,
+          width: codeColumnWidth,
+          height: rowSectionHeight,
+        },
+        bounds,
+      ),
+    ].filter((entry): entry is ReturnType<typeof sharp> => entry !== null);
 
-    regionPipelines.push(
-      pipeline.clone().extract({
-        left: 0,
-        top: 0,
-        width,
-        height: fullTableHeight,
-      }),
-      pipeline.clone().extract({
-        left: 0,
-        top: 0,
-        width: codeColumnWidth,
-        height: fullTableHeight,
-      }),
-      pipeline.clone().extract({
-        left: 0,
-        top: 0,
-        width: upperLeftWidth,
-        height: upperLeftHeight,
-      }),
-      pipeline.clone().extract({
-        left: 0,
-        top: rowSectionTop,
-        width: codeColumnWidth,
-        height: rowSectionHeight,
-      }),
-    );
+    regionPipelines.push(...extracts);
   }
 
   return regionPipelines;
@@ -178,21 +223,30 @@ async function buildLeftColumnPipelines(pipeline: ReturnType<typeof sharp>) {
   const upperHeight = Math.max(1, Math.round(height * 0.42));
   const rowSectionTop = Math.max(0, Math.round(height * 0.14));
   const rowSectionHeight = Math.max(1, Math.round(height * 0.22));
+  const bounds = { width, height };
 
   return [
-    pipeline.clone().extract({
-      left: 0,
-      top: 0,
-      width: leftWidth,
-      height: upperHeight,
-    }),
-    pipeline.clone().extract({
-      left: 0,
-      top: rowSectionTop,
-      width: leftWidth,
-      height: rowSectionHeight,
-    }),
-  ];
+    safeExtract(
+      pipeline,
+      {
+        left: 0,
+        top: 0,
+        width: leftWidth,
+        height: upperHeight,
+      },
+      bounds,
+    ),
+    safeExtract(
+      pipeline,
+      {
+        left: 0,
+        top: rowSectionTop,
+        width: leftWidth,
+        height: rowSectionHeight,
+      },
+      bounds,
+    ),
+  ].filter((entry): entry is ReturnType<typeof sharp> => entry !== null);
 }
 
 function fastVariantBuffers(pipeline: ReturnType<typeof sharp>) {
