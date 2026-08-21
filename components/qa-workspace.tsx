@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, SyntheticEvent, useEffect, useMemo, useRef, useState } from "react";
 import jsQR from "jsqr";
 import type { AuthUser } from "@/lib/auth/session";
 
@@ -65,6 +65,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [showHistory, setShowHistory] = useState(false);
   const [manualCodesInput, setManualCodesInput] = useState("");
   const [failedOcrPreview, setFailedOcrPreview] = useState("");
+  const [labelVideoIsPortrait, setLabelVideoIsPortrait] = useState(true);
 
   const uniqueCodeCount = useMemo(() => session?.codes.length ?? 0, [session]);
   const manualCodeCount = useMemo(
@@ -134,6 +135,14 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     setIsCameraOpen(false);
     setCameraMode(null);
+  }
+
+  function handleLabelVideoLoadedMetadata(event: SyntheticEvent<HTMLVideoElement>) {
+    const target = event.currentTarget;
+
+    if (target.videoWidth && target.videoHeight) {
+      setLabelVideoIsPortrait(target.videoHeight >= target.videoWidth);
+    }
   }
 
   async function createLandscapeCapture(video: HTMLVideoElement) {
@@ -261,7 +270,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       setIsCameraOpen(true);
       setCameraMode("label");
       setStatus(
-        "Camera ready. Keep the phone upright, place the full label inside the wide guide box, then capture.",
+        "Camera ready. Zoom in so the 2D Code column fills the dashed box, then capture.",
       );
     } catch {
       setCameraError(
@@ -670,6 +679,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       autoPlay
                       playsInline
                       muted
+                      onLoadedMetadata={handleLabelVideoLoadedMetadata}
                       className="label-camera-video"
                       style={{
                         width: "100%",
@@ -681,11 +691,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       className="label-camera-guide"
                       style={{
                         position: "absolute",
-                        left: "50%",
-                        top: "50%",
-                        width: "88%",
-                        height: "40%",
-                        transform: "translate(-50%, -50%)",
+                        left: labelVideoIsPortrait ? "3%" : "3%",
+                        top: labelVideoIsPortrait ? "3%" : "10%",
+                        width: labelVideoIsPortrait ? "94%" : "45%",
+                        height: labelVideoIsPortrait ? "45%" : "80%",
                         border: "3px dashed #4ade80",
                         borderRadius: 12,
                         boxSizing: "border-box",
@@ -709,7 +718,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                         pointerEvents: "none",
                       }}
                     >
-                      Keep phone upright. Fit the full label inside the dashed box.
+                      Zoom in: fit only the 2D Code column inside the dashed box.
                     </div>
                   </div>
                   <div className="button-row" style={{ marginTop: 14 }}>
