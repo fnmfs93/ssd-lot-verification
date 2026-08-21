@@ -812,21 +812,63 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
               {isCameraOpen && cameraMode === "part" ? (
                 <div className="card" style={{ marginBottom: 16, padding: 16 }}>
-                  <video
-                    ref={partVideoRef}
-                    autoPlay
-                    playsInline
-                    muted
+                  <div
                     style={{
+                      position: "relative",
                       width: "100%",
                       aspectRatio: "16 / 9",
                       minHeight: 240,
                       maxHeight: 360,
-                      objectFit: "contain",
                       borderRadius: 18,
+                      overflow: "hidden",
                       background: "#000",
                     }}
-                  />
+                  >
+                    <video
+                      ref={partVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                      }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: "50%",
+                        top: "50%",
+                        transform: "translate(-50%, -50%)",
+                        width: "55%",
+                        aspectRatio: "1 / 1",
+                        maxWidth: "70%",
+                        border: "3px dashed #4ade80",
+                        borderRadius: 12,
+                        boxSizing: "border-box",
+                        pointerEvents: "none",
+                      }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 8,
+                        right: 8,
+                        bottom: 8,
+                        color: "#fff",
+                        background: "rgba(0, 0, 0, 0.6)",
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        fontSize: 12,
+                        lineHeight: 1.3,
+                        textAlign: "center",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      Center the 2D code inside the box
+                    </div>
+                  </div>
                   <p className="muted" style={{ marginBottom: 0 }}>
                     Small-code tip: fill as much of the frame as possible with the QR,
                     avoid glare, and keep the phone very steady.
