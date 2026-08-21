@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["tesseract.js"],
+  serverExternalPackages: ["tesseract.js", "sharp"],
   outputFileTracingIncludes: {
     "/api/label-session": [
       "./node_modules/tesseract.js/**",
@@ -17,6 +17,10 @@ const nextConfig: NextConfig = {
       "./node_modules/whatwg-url/**",
       "./node_modules/tr46/**",
       "./node_modules/webidl-conversions/**",
+      // sharp's native binding + libvips shared library live under the
+      // scoped @img/* packages, not node_modules/sharp itself.
+      "./node_modules/sharp/**",
+      "./node_modules/@img/**",
     ],
   },
 };
