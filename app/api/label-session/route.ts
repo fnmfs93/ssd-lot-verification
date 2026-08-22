@@ -5,7 +5,7 @@ import { extractCodesFromLabelBuffer } from "@/lib/ocr/extract-codes";
 import { storeLabelImage } from "@/lib/storage/google-drive";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 function parseManualCodes(value: string) {
   return [...new Set(value.toUpperCase().match(/\b[A-Z0-9]{11}\b/g) ?? [])];

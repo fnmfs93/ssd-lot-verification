@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { FormEvent, SyntheticEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import jsQR from "jsqr";
 import type { AuthUser } from "@/lib/auth/session";
 
@@ -65,7 +65,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [showHistory, setShowHistory] = useState(false);
   const [manualCodesInput, setManualCodesInput] = useState("");
   const [failedOcrPreview, setFailedOcrPreview] = useState("");
-  const [labelVideoIsPortrait, setLabelVideoIsPortrait] = useState(true);
 
   const uniqueCodeCount = useMemo(() => session?.codes.length ?? 0, [session]);
   const manualCodeCount = useMemo(
@@ -137,27 +136,15 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setCameraMode(null);
   }
 
-  function handleLabelVideoLoadedMetadata(event: SyntheticEvent<HTMLVideoElement>) {
-    const target = event.currentTarget;
-
-    if (target.videoWidth && target.videoHeight) {
-      setLabelVideoIsPortrait(target.videoHeight >= target.videoWidth);
-    }
-  }
-
-  async function createLandscapeCapture(video: HTMLVideoElement) {
-    const sourceWidth = video.videoWidth || 1920;
-    const sourceHeight = video.videoHeight || 1080;
-    const shouldRotate = sourceHeight > sourceWidth;
+  async function captureVideoFrame(video: HTMLVideoElement) {
+    // No forced rotation: send the frame exactly as framed on screen. The
+    // OCR pipeline already tries 0/90/270 degree rotations server-side, and
+    // a forced client-side rotation was making the captured preview look
+    // sideways relative to what the guide box promised, which pushed the
+    // code column out of where the fast OCR tier expects to find it.
     const canvas = document.createElement("canvas");
-
-    if (shouldRotate) {
-      canvas.width = sourceHeight;
-      canvas.height = sourceWidth;
-    } else {
-      canvas.width = sourceWidth;
-      canvas.height = sourceHeight;
-    }
+    canvas.width = video.videoWidth || 1920;
+    canvas.height = video.videoHeight || 1080;
 
     const context = canvas.getContext("2d");
 
@@ -165,13 +152,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       return null;
     }
 
-    if (shouldRotate) {
-      context.translate(canvas.width / 2, canvas.height / 2);
-      context.rotate(-Math.PI / 2);
-      context.drawImage(video, -sourceWidth / 2, -sourceHeight / 2, sourceWidth, sourceHeight);
-    } else {
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     return canvas;
   }
@@ -286,7 +267,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     }
 
     const video = labelVideoRef.current;
-    const baseCanvas = await createLandscapeCapture(video);
+    const baseCanvas = await captureVideoFrame(video);
 
     if (!baseCanvas) {
       setCameraError("Unable to capture the label image.");
@@ -679,7 +660,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       autoPlay
                       playsInline
                       muted
-                      onLoadedMetadata={handleLabelVideoLoadedMetadata}
                       className="label-camera-video"
                       style={{
                         width: "100%",
@@ -691,10 +671,15 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       className="label-camera-guide"
                       style={{
                         position: "absolute",
-                        left: labelVideoIsPortrait ? "3%" : "3%",
-                        top: labelVideoIsPortrait ? "3%" : "10%",
-                        width: labelVideoIsPortrait ? "94%" : "45%",
-                        height: labelVideoIsPortrait ? "45%" : "80%",
+                        // Matches where the OCR pipeline's first (fastest)
+                        // pass crops the uploaded frame — upper-left, ~28%
+                        // width / ~42% height (lib/ocr/extract-codes.ts's
+                        // buildLeftColumnPipelines) — since the photo is now
+                        // uploaded exactly as framed, with no rotation.
+                        left: "4%",
+                        top: "4%",
+                        width: "40%",
+                        height: "48%",
                         border: "3px dashed #4ade80",
                         borderRadius: 12,
                         boxSizing: "border-box",
