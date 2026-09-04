@@ -4,6 +4,22 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import jsQR from "jsqr";
 import type { AuthUser } from "@/lib/auth/session";
+import { extractCandidateCodes } from "@/lib/ocr/code-matching";
+import {
+  captureVideoRegion,
+  preprocessForOcr,
+  recognizeCanvas,
+  terminateBrowserOcrWorker,
+} from "@/lib/ocr/browser-ocr";
+
+// Fraction of the label camera frame the guide box covers — kept as a
+// constant so the visual overlay and the actual OCR crop region can never
+// drift apart. Matches the upper-left area where the 2D Code column ends up
+// once the user zooms in per the on-screen hint.
+const LABEL_GUIDE_REGION = { left: 0.04, top: 0.04, width: 0.4, height: 0.48 };
+const LABEL_SCAN_INTERVAL_MS = 400;
+const LABEL_SCAN_MAX_ATTEMPTS = 25;
+const LABEL_SCAN_STABLE_ATTEMPTS = 1;
 
 type BarcodeDetectorLike = {
   detect(image: ImageBitmapSource): Promise<Array<{ rawValue?: string }>>;
@@ -46,6 +62,11 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const scanLoopRef = useRef<number | null>(null);
   const submitTimeoutRef = useRef<number | null>(null);
   const lastSubmittedValueRef = useRef<string>("");
+  const labelScanActiveRef = useRef(false);
+  const labelScanTimeoutRef = useRef<number | null>(null);
+  const labelScanTextsRef = useRef<string[]>([]);
+  const labelScanPrevCodesRef = useRef<string[]>([]);
+  const labelScanStableCountRef = useRef(0);
 
   const [session, setSession] = useState<SessionState | null>(null);
   const [history, setHistory] = useState<VerificationRecord[]>([]);
@@ -65,6 +86,9 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [showHistory, setShowHistory] = useState(false);
   const [manualCodesInput, setManualCodesInput] = useState("");
   const [failedOcrPreview, setFailedOcrPreview] = useState("");
+  const [isLabelScanning, setIsLabelScanning] = useState(false);
+  const [liveScanCodes, setLiveScanCodes] = useState<string[]>([]);
+  const [liveScanRawText, setLiveScanRawText] = useState("");
 
   const uniqueCodeCount = useMemo(() => session?.codes.length ?? 0, [session]);
   const manualCodeCount = useMemo(
@@ -87,6 +111,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     const playVideo = async () => {
       try {
         await video.play();
+
+        if (cameraMode === "label") {
+          startLabelScanLoop();
+        }
       } catch {
         setCameraError(
           "Camera preview could not start on this device. Try reopening the camera or use file upload / scanner input instead.",
@@ -100,6 +128,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   useEffect(() => {
     return () => {
       stopCamera();
+      void terminateBrowserOcrWorker();
 
       if (submitTimeoutRef.current) {
         window.clearTimeout(submitTimeoutRef.current);
@@ -120,6 +149,15 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       window.cancelAnimationFrame(scanLoopRef.current);
       scanLoopRef.current = null;
     }
+
+    labelScanActiveRef.current = false;
+
+    if (labelScanTimeoutRef.current) {
+      window.clearTimeout(labelScanTimeoutRef.current);
+      labelScanTimeoutRef.current = null;
+    }
+
+    setIsLabelScanning(false);
 
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
@@ -234,6 +272,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
   async function handleStartLabelCamera() {
     setCameraError(null);
+    setUploadError(null);
+    setFailedOcrPreview("");
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -251,7 +291,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       setIsCameraOpen(true);
       setCameraMode("label");
       setStatus(
-        "Camera ready. Zoom in so the 2D Code column fills the dashed box, then capture.",
+        "Camera ready. Fill the dashed box with the 2D Code column and hold steady — scanning automatically.",
       );
     } catch {
       setCameraError(
@@ -260,45 +300,167 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     }
   }
 
-  async function handleCaptureLabel() {
-    if (!labelVideoRef.current) {
-      setCameraError("Camera preview is not ready yet.");
+  function startLabelScanLoop() {
+    labelScanTextsRef.current = [];
+    labelScanPrevCodesRef.current = [];
+    labelScanStableCountRef.current = 0;
+    labelScanActiveRef.current = true;
+    setIsLabelScanning(true);
+    scheduleNextLabelScan();
+  }
+
+  function scheduleNextLabelScan() {
+    if (!labelScanActiveRef.current) {
       return;
     }
 
+    labelScanTimeoutRef.current = window.setTimeout(() => {
+      void runLabelScanAttempt();
+    }, LABEL_SCAN_INTERVAL_MS);
+  }
+
+  async function runLabelScanAttempt() {
     const video = labelVideoRef.current;
-    const baseCanvas = await captureVideoFrame(video);
 
-    if (!baseCanvas) {
-      setCameraError("Unable to capture the label image.");
+    if (!labelScanActiveRef.current || !video || video.readyState < 2 || !video.videoWidth) {
+      scheduleNextLabelScan();
       return;
     }
 
-    const canvas = await cropCanvasToContent(baseCanvas);
+    const region = {
+      left: video.videoWidth * LABEL_GUIDE_REGION.left,
+      top: video.videoHeight * LABEL_GUIDE_REGION.top,
+      width: video.videoWidth * LABEL_GUIDE_REGION.width,
+      height: video.videoHeight * LABEL_GUIDE_REGION.height,
+    };
 
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob(resolve, "image/jpeg", 0.92);
-    });
+    const regionCanvas = captureVideoRegion(video, region);
 
-    if (!blob) {
-      setCameraError("Unable to save the captured frame.");
-      return;
-    }
+    if (regionCanvas) {
+      preprocessForOcr(regionCanvas);
 
-    const file = new File([blob], `label-${Date.now()}.jpg`, {
-      type: "image/jpeg",
-    });
-
-    setCapturedLabelFile(file);
-    setCapturedPreviewUrl((current) => {
-      if (current) {
-        URL.revokeObjectURL(current);
+      try {
+        const text = await recognizeCanvas(regionCanvas);
+        labelScanTextsRef.current.push(text);
+      } catch {
+        // A single failed OCR pass isn't fatal — just try again next tick.
       }
+    }
 
-      return URL.createObjectURL(file);
-    });
+    if (!labelScanActiveRef.current) {
+      // Scanning was stopped (camera closed) while this pass was running.
+      return;
+    }
+
+    const codes = extractCandidateCodes(labelScanTextsRef.current);
+    const attemptsSoFar = labelScanTextsRef.current.length;
+    const previous = labelScanPrevCodesRef.current;
+    const unchanged =
+      codes.length === previous.length && codes.every((code, index) => code === previous[index]);
+
+    labelScanPrevCodesRef.current = codes;
+    labelScanStableCountRef.current =
+      unchanged && codes.length > 0 ? labelScanStableCountRef.current + 1 : 0;
+
+    const isStable = labelScanStableCountRef.current >= LABEL_SCAN_STABLE_ATTEMPTS;
+
+    if ((codes.length > 0 && isStable) || attemptsSoFar >= LABEL_SCAN_MAX_ATTEMPTS) {
+      await finalizeLabelScan(codes, labelScanTextsRef.current.join("\n\n--- SCAN ---\n\n"));
+      return;
+    }
+
+    setStatus(
+      `Scanning... found ${codes.length} code${codes.length === 1 ? "" : "s"} so far. Keep the label steady.`,
+    );
+    scheduleNextLabelScan();
+  }
+
+  async function finalizeLabelScan(codes: string[], rawText: string) {
+    const video = labelVideoRef.current;
+    const baseCanvas = video ? await captureVideoFrame(video) : null;
+    const canvas = baseCanvas ? await cropCanvasToContent(baseCanvas) : null;
+
+    if (canvas) {
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob(resolve, "image/jpeg", 0.92);
+      });
+
+      if (blob) {
+        const file = new File([blob], `label-${Date.now()}.jpg`, {
+          type: "image/jpeg",
+        });
+
+        setCapturedLabelFile(file);
+        setCapturedPreviewUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+
+          return URL.createObjectURL(file);
+        });
+      }
+    }
+
+    setLiveScanCodes(codes);
+    setLiveScanRawText(rawText);
     stopCamera();
-    setStatus("Label captured in landscape. Submit it to extract the codes.");
+    setStatus(
+      codes.length
+        ? `Found ${codes.length} code${codes.length === 1 ? "" : "s"}. Review below and press Process Label to save this session.`
+        : "Couldn't read a code automatically. Reposition and scan again, or paste the codes manually below.",
+    );
+  }
+
+  async function runOcrOnFile(file: File): Promise<{ codes: string[]; rawText: string }> {
+    const bitmap = await createImageBitmap(file);
+    const rotations = [0, 90, 270] as const;
+    const texts: string[] = [];
+
+    try {
+      for (const rotation of rotations) {
+        const canvas = document.createElement("canvas");
+        const rotated = rotation === 90 || rotation === 270;
+        canvas.width = rotated ? bitmap.height : bitmap.width;
+        canvas.height = rotated ? bitmap.width : bitmap.height;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          continue;
+        }
+
+        context.save();
+
+        if (rotation === 90) {
+          context.translate(canvas.width, 0);
+          context.rotate(Math.PI / 2);
+        } else if (rotation === 270) {
+          context.translate(0, canvas.height);
+          context.rotate(-Math.PI / 2);
+        }
+
+        context.drawImage(bitmap, 0, 0);
+        context.restore();
+        preprocessForOcr(canvas);
+
+        try {
+          texts.push(await recognizeCanvas(canvas));
+        } catch {
+          // Ignore this rotation's failure and try the next one.
+        }
+
+        if (extractCandidateCodes(texts).length) {
+          break;
+        }
+      }
+    } finally {
+      bitmap.close();
+    }
+
+    return {
+      codes: extractCandidateCodes(texts),
+      rawText: texts.join("\n\n--- OCR PASS ---\n\n"),
+    };
   }
 
   async function handleStartPartCamera() {
@@ -510,29 +672,49 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setLastResult(null);
     setHistory([]);
     setIsUploading(true);
-    setStatus("Extracting codes from label...");
+    setStatus("Saving label session...");
 
     const form = event.currentTarget;
     const formData = new FormData(form);
     const uploadedFile = formData.get("file");
-    const selectedFile =
-      uploadedFile instanceof File && uploadedFile.size > 0
-        ? uploadedFile
-        : capturedLabelFile;
+    const isCapturedFile =
+      capturedLabelFile instanceof File &&
+      !(uploadedFile instanceof File && uploadedFile.size > 0);
+    const selectedFile = isCapturedFile ? capturedLabelFile : uploadedFile;
 
-    if (!selectedFile) {
+    if (!(selectedFile instanceof File) || selectedFile.size === 0) {
       setIsUploading(false);
-      setUploadError("Choose a label image or capture one with the camera.");
+      setUploadError("Choose a label image or scan one with the camera.");
       setStatus("Waiting for a label image.");
       return;
     }
 
+    // The live camera scan already extracted codes client-side. A freshly
+    // picked file hasn't been read yet — OCR it once (client-side, no
+    // server round trip) before submitting.
+    let codes = isCapturedFile ? liveScanCodes : [];
+    let rawOcrText = isCapturedFile ? liveScanRawText : "";
+
+    if (!isCapturedFile) {
+      setStatus("Reading codes from the uploaded image...");
+
+      try {
+        const result = await runOcrOnFile(selectedFile);
+        codes = result.codes;
+        rawOcrText = result.rawText;
+      } catch {
+        // Fall through with no codes — the manual fallback and the
+        // server's "no codes found" message still apply.
+      }
+
+      setStatus("Saving label session...");
+    }
+
     formData.set("file", selectedFile);
-    formData.set(
-      "sourceType",
-      capturedLabelFile && selectedFile === capturedLabelFile ? "camera" : "upload",
-    );
+    formData.set("sourceType", isCapturedFile ? "camera" : "upload");
     formData.set("manualCodes", manualCodesInput);
+    formData.set("codes", JSON.stringify(codes));
+    formData.set("rawOcrText", rawOcrText);
 
     const response = await fetch("/api/label-session", {
       method: "POST",
@@ -571,6 +753,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setCapturedLabelFile(null);
     setManualCodesInput("");
     setFailedOcrPreview("");
+    setLiveScanCodes([]);
+    setLiveScanRawText("");
     setCapturedPreviewUrl((current) => {
       if (current) {
         URL.revokeObjectURL(current);
@@ -671,15 +855,13 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       className="label-camera-guide"
                       style={{
                         position: "absolute",
-                        // Matches where the OCR pipeline's first (fastest)
-                        // pass crops the uploaded frame — upper-left, ~28%
-                        // width / ~42% height (lib/ocr/extract-codes.ts's
-                        // buildLeftColumnPipelines) — since the photo is now
-                        // uploaded exactly as framed, with no rotation.
-                        left: "4%",
-                        top: "4%",
-                        width: "40%",
-                        height: "48%",
+                        // The client-side OCR scan crops exactly this region
+                        // of each frame — keep this in sync with
+                        // LABEL_GUIDE_REGION.
+                        left: `${LABEL_GUIDE_REGION.left * 100}%`,
+                        top: `${LABEL_GUIDE_REGION.top * 100}%`,
+                        width: `${LABEL_GUIDE_REGION.width * 100}%`,
+                        height: `${LABEL_GUIDE_REGION.height * 100}%`,
                         border: "3px dashed #4ade80",
                         borderRadius: 12,
                         boxSizing: "border-box",
@@ -703,13 +885,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                         pointerEvents: "none",
                       }}
                     >
-                      Zoom in: fit only the 2D Code column inside the dashed box.
+                      {isLabelScanning
+                        ? "Scanning automatically — fit the 2D Code column in the box."
+                        : "Fit the 2D Code column inside the dashed box."}
                     </div>
-                  </div>
-                  <div className="button-row" style={{ marginTop: 14 }}>
-                    <button className="button" type="button" onClick={handleCaptureLabel}>
-                      Capture Label
-                    </button>
                   </div>
                 </div>
               ) : null}

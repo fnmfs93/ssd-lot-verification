@@ -1,28 +1,10 @@
 import type { NextConfig } from "next";
 
-const nextConfig: NextConfig = {
-  serverExternalPackages: ["tesseract.js", "sharp"],
-  outputFileTracingIncludes: {
-    "/api/label-session": [
-      "./node_modules/tesseract.js/**",
-      "./node_modules/tesseract.js-core/**",
-      "./node_modules/bmp-js/**",
-      "./node_modules/idb-keyval/**",
-      "./node_modules/is-url/**",
-      "./node_modules/node-fetch/**",
-      "./node_modules/opencollective-postinstall/**",
-      "./node_modules/regenerator-runtime/**",
-      "./node_modules/wasm-feature-detect/**",
-      "./node_modules/zlibjs/**",
-      "./node_modules/whatwg-url/**",
-      "./node_modules/tr46/**",
-      "./node_modules/webidl-conversions/**",
-      // sharp's native binding + libvips shared library live under the
-      // scoped @img/* packages, not node_modules/sharp itself.
-      "./node_modules/sharp/**",
-      "./node_modules/@img/**",
-    ],
-  },
-};
+// OCR now runs entirely client-side (lib/ocr/browser-ocr.ts) instead of via
+// sharp + tesseract.js on the server, so none of the server-bundling
+// workarounds this file used to need (serverExternalPackages,
+// outputFileTracingIncludes for tesseract.js's worker script and sharp's
+// native libvips binary) are required any more.
+const nextConfig: NextConfig = {};
 
 export default nextConfig;
