@@ -20,6 +20,11 @@ const LABEL_GUIDE_REGION = { left: 0.04, top: 0.04, width: 0.4, height: 0.48 };
 const LABEL_SCAN_INTERVAL_MS = 400;
 const LABEL_SCAN_MAX_ATTEMPTS = 25;
 const LABEL_SCAN_STABLE_ATTEMPTS = 1;
+// Only the most recent attempts count toward the result. Without this, a
+// moment of hand drift early in a long scan (briefly capturing a
+// neighboring row) would stay baked into the accumulated text forever, even
+// after framing settles back onto the intended codes.
+const LABEL_SCAN_WINDOW = 6;
 
 type BarcodeDetectorLike = {
   detect(image: ImageBitmapSource): Promise<Array<{ rawValue?: string }>>;
@@ -67,6 +72,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const labelScanTextsRef = useRef<string[]>([]);
   const labelScanPrevCodesRef = useRef<string[]>([]);
   const labelScanStableCountRef = useRef(0);
+  const labelScanAttemptCountRef = useRef(0);
 
   const [session, setSession] = useState<SessionState | null>(null);
   const [history, setHistory] = useState<VerificationRecord[]>([]);
@@ -304,6 +310,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     labelScanTextsRef.current = [];
     labelScanPrevCodesRef.current = [];
     labelScanStableCountRef.current = 0;
+    labelScanAttemptCountRef.current = 0;
     labelScanActiveRef.current = true;
     setIsLabelScanning(true);
     scheduleNextLabelScan();
@@ -342,10 +349,19 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       try {
         const text = await recognizeCanvas(regionCanvas);
         labelScanTextsRef.current.push(text);
+
+        // Keep only the most recent attempts so the result reflects current
+        // framing, not everything the camera has drifted across since the
+        // scan started.
+        if (labelScanTextsRef.current.length > LABEL_SCAN_WINDOW) {
+          labelScanTextsRef.current = labelScanTextsRef.current.slice(-LABEL_SCAN_WINDOW);
+        }
       } catch {
         // A single failed OCR pass isn't fatal — just try again next tick.
       }
     }
+
+    labelScanAttemptCountRef.current += 1;
 
     if (!labelScanActiveRef.current) {
       // Scanning was stopped (camera closed) while this pass was running.
@@ -353,7 +369,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     }
 
     const codes = extractCandidateCodes(labelScanTextsRef.current);
-    const attemptsSoFar = labelScanTextsRef.current.length;
     const previous = labelScanPrevCodesRef.current;
     const unchanged =
       codes.length === previous.length && codes.every((code, index) => code === previous[index]);
@@ -364,7 +379,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     const isStable = labelScanStableCountRef.current >= LABEL_SCAN_STABLE_ATTEMPTS;
 
-    if ((codes.length > 0 && isStable) || attemptsSoFar >= LABEL_SCAN_MAX_ATTEMPTS) {
+    if (
+      (codes.length > 0 && isStable) ||
+      labelScanAttemptCountRef.current >= LABEL_SCAN_MAX_ATTEMPTS
+    ) {
       await finalizeLabelScan(codes, labelScanTextsRef.current.join("\n\n--- SCAN ---\n\n"));
       return;
     }
