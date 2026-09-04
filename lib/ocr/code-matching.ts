@@ -8,8 +8,53 @@
 // "11 alphanumeric characters" check.
 const CODE_PATTERN = /^J\d{8}[A-Z0-9]{2}$/;
 
+// Characters OCR commonly mistakes for a digit. The MMYYDD segment
+// (positions 2-7) is always pure digits by definition, so any letter
+// appearing there is necessarily a misread — safe to correct outright
+// rather than just reject.
+const DIGIT_LOOKALIKES: Record<string, string> = {
+  B: "8",
+  O: "0",
+  D: "0",
+  Q: "0",
+  I: "1",
+  L: "1",
+  S: "5",
+  Z: "2",
+  G: "6",
+};
+
+function correctDigitZone(value: string) {
+  if (value.length !== 11) {
+    return value;
+  }
+
+  const chars = value.split("");
+
+  for (let index = 1; index <= 6; index += 1) {
+    const replacement = DIGIT_LOOKALIKES[chars[index]];
+
+    if (replacement) {
+      chars[index] = replacement;
+    }
+  }
+
+  return chars.join("");
+}
+
 export function looksLikeCode(value: string) {
   return CODE_PATTERN.test(value);
+}
+
+/** Returns the canonical code form if `value` matches as-is or after
+ * correcting known digit look-alikes in the MMYYDD zone, else null. */
+export function normalizeCodeCandidate(value: string) {
+  if (looksLikeCode(value)) {
+    return value;
+  }
+
+  const corrected = correctDigitZone(value);
+  return looksLikeCode(corrected) ? corrected : null;
 }
 
 export function collectDirectMatches(text: string) {
@@ -43,20 +88,34 @@ export function collectLineNormalizedMatches(text: string) {
   return matches;
 }
 
-export function extractCandidateCodes(texts: string[]) {
+/**
+ * `minTotalCount` raises the bar for how many times a code must be seen
+ * (across both direct and normalized matches combined) before it's
+ * trusted. Live camera scanning passes 2+ here — with plenty of repeated
+ * reads available, requiring corroboration for every candidate (including
+ * otherwise-trusted direct matches) filters out one-off misreads from a
+ * moment of camera drift. A single-pass read (e.g. one file upload
+ * rotation) can't reasonably clear that bar, so it keeps the default of 1.
+ */
+export function extractCandidateCodes(texts: string[], options?: { minTotalCount?: number }) {
+  const minTotalCount = options?.minTotalCount ?? 1;
   const directCounts = new Map<string, number>();
   const normalizedCounts = new Map<string, number>();
 
   for (const text of texts) {
     for (const candidate of collectDirectMatches(text)) {
-      if (looksLikeCode(candidate)) {
-        directCounts.set(candidate, (directCounts.get(candidate) ?? 0) + 1);
+      const normalized = normalizeCodeCandidate(candidate);
+
+      if (normalized) {
+        directCounts.set(normalized, (directCounts.get(normalized) ?? 0) + 1);
       }
     }
 
     for (const candidate of collectLineNormalizedMatches(text)) {
-      if (looksLikeCode(candidate)) {
-        normalizedCounts.set(candidate, (normalizedCounts.get(candidate) ?? 0) + 1);
+      const normalized = normalizeCodeCandidate(candidate);
+
+      if (normalized) {
+        normalizedCounts.set(normalized, (normalizedCounts.get(normalized) ?? 0) + 1);
       }
     }
   }
@@ -74,6 +133,7 @@ export function extractCandidateCodes(texts: string[]) {
   }
 
   return [...counts.entries()]
+    .filter(([, count]) => count >= minTotalCount)
     .sort((left, right) => {
       const countDelta = right[1] - left[1];
 
