@@ -4,7 +4,11 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import jsQR from "jsqr";
 import type { AuthUser } from "@/lib/auth/session";
-import { extractCandidateCodes } from "@/lib/ocr/code-matching";
+import {
+  extractCandidateCodes,
+  extractPartNumberCandidates,
+  extractSessionIdCandidates,
+} from "@/lib/ocr/code-matching";
 import {
   captureVideoRegion,
   preprocessForOcr,
@@ -12,19 +16,61 @@ import {
   terminateBrowserOcrWorker,
 } from "@/lib/ocr/browser-ocr";
 
-// Fraction of the label camera frame the guide box covers — kept as a
-// constant so the visual overlay and the actual OCR crop region can never
-// drift apart. Matches the upper-left area where the 2D Code column ends up
-// once the user zooms in per the on-screen hint.
-const LABEL_GUIDE_REGION = { left: 0.04, top: 0.04, width: 0.4, height: 0.48 };
+// The label wizard walks through these four fields in one continuous camera
+// session — the operator just re-frames the phone at each field in turn,
+// nothing to tap between steps.
+type LabelWizardStage = "sessionId" | "partNumber" | "firstBoxCodes" | "lastBoxCodes";
+
+const LABEL_STAGE_SEQUENCE: LabelWizardStage[] = [
+  "sessionId",
+  "partNumber",
+  "firstBoxCodes",
+  "lastBoxCodes",
+];
+
+// Fractions of the camera frame each stage's guide box covers — kept as
+// constants so the visual overlay and the actual OCR crop region can never
+// drift apart. The 2D Code column is a narrow tall column (reused for both
+// boxes); Session ID / Part Number are short wide lines near the top.
+const CODE_GUIDE_REGION = { left: 0.04, top: 0.04, width: 0.4, height: 0.48 };
+const LINE_GUIDE_REGION = { left: 0.06, top: 0.08, width: 0.72, height: 0.16 };
+
+const LABEL_STAGE_CONFIG: Record<
+  LabelWizardStage,
+  { title: string; hint: string; guideRegion: typeof CODE_GUIDE_REGION }
+> = {
+  sessionId: {
+    title: "Session ID",
+    hint: "Frame the Session ID (e.g. 20260801-0001) inside the box.",
+    guideRegion: LINE_GUIDE_REGION,
+  },
+  partNumber: {
+    title: "Part Number",
+    hint: "Frame the Part Number (e.g. M034-002816) inside the box.",
+    guideRegion: LINE_GUIDE_REGION,
+  },
+  firstBoxCodes: {
+    title: "First Box — 2D Codes",
+    hint: "Frame the First Box label's 2D Code column inside the box.",
+    guideRegion: CODE_GUIDE_REGION,
+  },
+  lastBoxCodes: {
+    title: "Last Box — 2D Codes",
+    hint: "Swap to the Last Box label, then frame its 2D Code column.",
+    guideRegion: CODE_GUIDE_REGION,
+  },
+};
+
 const LABEL_SCAN_INTERVAL_MS = 400;
 const LABEL_SCAN_MAX_ATTEMPTS = 25;
-// How many consecutive attempts must pass with no *new* code appearing
-// before the scan is considered done. Codes accumulate across the whole
-// scan (a single frame doesn't always read every row cleanly), so
-// "finished" means discovery has plateaued, not that the exact result was
-// byte-identical twice in a row.
+// How many consecutive attempts must pass with no *new* result appearing
+// before a stage is considered done. Results accumulate across a stage's
+// attempts (a single frame doesn't always read cleanly), so "finished"
+// means discovery has plateaued, not that the exact result repeated once.
 const LABEL_SCAN_PLATEAU_ATTEMPTS = 3;
+
+const SESSION_ID_PATTERN = /^\d{8}-\d{4}$/;
+const PART_NUMBER_PATTERN = /^[A-Z]\d{3}-\d{6}$/;
 
 type BarcodeDetectorLike = {
   detect(image: ImageBitmapSource): Promise<Array<{ rawValue?: string }>>;
@@ -44,16 +90,21 @@ type VerificationRecord = {
   scannedQrValue: string;
   result: "matched" | "unmatched";
   matchedLabelCode: string | null;
+  matchedBoxLabel: "first" | "last" | null;
+  matchedSerialIndex: number | null;
   verifiedAt: string;
 };
 
 type SessionState = {
   sessionKey: string;
-  codes: string[];
-  imageRef: string;
+  sessionIdCode: string;
+  partNumber: string;
+  firstBoxCodes: string[];
+  lastBoxCodes: string[];
   storageMode: string;
-  ocrPreview: string;
 };
+
+type ReportOutcome = "pass" | "fail";
 
 function parseManualCodes(value: string) {
   return [...new Set(value.toUpperCase().match(/\b[A-Z0-9]{11}\b/g) ?? [])];
@@ -67,12 +118,15 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const scanLoopRef = useRef<number | null>(null);
   const submitTimeoutRef = useRef<number | null>(null);
   const lastSubmittedValueRef = useRef<string>("");
+
   const labelScanActiveRef = useRef(false);
   const labelScanTimeoutRef = useRef<number | null>(null);
   const labelScanTextsRef = useRef<string[]>([]);
-  const labelScanPrevCodesRef = useRef<string[]>([]);
+  const labelScanPrevResultRef = useRef<string[]>([]);
   const labelScanStableCountRef = useRef(0);
   const labelScanAttemptCountRef = useRef(0);
+  const labelStageRef = useRef<LabelWizardStage>("sessionId");
+  const allStagesRawTextRef = useRef<string[]>([]);
 
   const [session, setSession] = useState<SessionState | null>(null);
   const [history, setHistory] = useState<VerificationRecord[]>([]);
@@ -82,25 +136,81 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [status, setStatus] = useState<string>("Ready for a new label session.");
   const [isUploading, setIsUploading] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [cameraMode, setCameraMode] = useState<"label" | "part" | null>(null);
+  const [labelStage, setLabelStage] = useState<LabelWizardStage>("sessionId");
   const [lastResult, setLastResult] = useState<VerificationRecord | null>(null);
-  const [capturedLabelFile, setCapturedLabelFile] = useState<File | null>(null);
-  const [capturedPreviewUrl, setCapturedPreviewUrl] = useState<string | null>(null);
   const [partScanValue, setPartScanValue] = useState("");
   const [showCodes, setShowCodes] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [manualCodesInput, setManualCodesInput] = useState("");
-  const [failedOcrPreview, setFailedOcrPreview] = useState("");
-  const [isLabelScanning, setIsLabelScanning] = useState(false);
-  const [liveScanCodes, setLiveScanCodes] = useState<string[]>([]);
-  const [liveScanRawText, setLiveScanRawText] = useState("");
+  const [remarksInput, setRemarksInput] = useState("");
 
-  const uniqueCodeCount = useMemo(() => session?.codes.length ?? 0, [session]);
-  const manualCodeCount = useMemo(
-    () => parseManualCodes(manualCodesInput).length,
-    [manualCodesInput],
+  // Populated once the 4-stage scan finishes; reviewed/correctable before
+  // saving the label session.
+  const [isReviewReady, setIsReviewReady] = useState(false);
+  const [scannedSessionId, setScannedSessionId] = useState("");
+  const [scannedPartNumber, setScannedPartNumber] = useState("");
+  const [scannedFirstBoxCodes, setScannedFirstBoxCodes] = useState<string[]>([]);
+  const [scannedLastBoxCodes, setScannedLastBoxCodes] = useState<string[]>([]);
+  const [firstBoxFile, setFirstBoxFile] = useState<File | null>(null);
+  const [firstBoxPreviewUrl, setFirstBoxPreviewUrl] = useState<string | null>(null);
+  const [lastBoxFile, setLastBoxFile] = useState<File | null>(null);
+  const [lastBoxPreviewUrl, setLastBoxPreviewUrl] = useState<string | null>(null);
+  const [firstBoxManualCodes, setFirstBoxManualCodes] = useState("");
+  const [lastBoxManualCodes, setLastBoxManualCodes] = useState("");
+  const [failedOcrPreview, setFailedOcrPreview] = useState("");
+
+  const [reportOutcome, setReportOutcome] = useState<ReportOutcome | null>(null);
+  const [reportSent, setReportSent] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+
+  const firstBoxManualCount = useMemo(
+    () => parseManualCodes(firstBoxManualCodes).length,
+    [firstBoxManualCodes],
   );
+  const lastBoxManualCount = useMemo(
+    () => parseManualCodes(lastBoxManualCodes).length,
+    [lastBoxManualCodes],
+  );
+
+  const canSaveSession =
+    SESSION_ID_PATTERN.test(scannedSessionId) &&
+    PART_NUMBER_PATTERN.test(scannedPartNumber) &&
+    (scannedFirstBoxCodes.length > 0 || firstBoxManualCount > 0) &&
+    (scannedLastBoxCodes.length > 0 || lastBoxManualCount > 0) &&
+    Boolean(firstBoxFile) &&
+    Boolean(lastBoxFile);
+
+  const slotStatuses = useMemo(() => {
+    if (!session) {
+      return [];
+    }
+
+    const slots: Array<{ box: "first" | "last"; serialIndex: number; codeValue: string }> = [
+      ...session.firstBoxCodes.map((codeValue, index) => ({
+        box: "first" as const,
+        serialIndex: index + 1,
+        codeValue,
+      })),
+      ...session.lastBoxCodes.map((codeValue, index) => ({
+        box: "last" as const,
+        serialIndex: index + 1,
+        codeValue,
+      })),
+    ];
+
+    return slots.map((slot) => ({
+      ...slot,
+      match:
+        history.find(
+          (item) =>
+            item.result === "matched" &&
+            item.matchedBoxLabel === slot.box &&
+            item.matchedSerialIndex === slot.serialIndex,
+        ) ?? null,
+    }));
+  }, [session, history]);
 
   useEffect(() => {
     const video =
@@ -144,11 +254,19 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
   useEffect(() => {
     return () => {
-      if (capturedPreviewUrl) {
-        URL.revokeObjectURL(capturedPreviewUrl);
+      if (firstBoxPreviewUrl) {
+        URL.revokeObjectURL(firstBoxPreviewUrl);
       }
     };
-  }, [capturedPreviewUrl]);
+  }, [firstBoxPreviewUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (lastBoxPreviewUrl) {
+        URL.revokeObjectURL(lastBoxPreviewUrl);
+      }
+    };
+  }, [lastBoxPreviewUrl]);
 
   function stopCamera() {
     if (scanLoopRef.current) {
@@ -162,8 +280,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       window.clearTimeout(labelScanTimeoutRef.current);
       labelScanTimeoutRef.current = null;
     }
-
-    setIsLabelScanning(false);
 
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
@@ -182,10 +298,9 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
   async function captureVideoFrame(video: HTMLVideoElement) {
     // No forced rotation: send the frame exactly as framed on screen. The
-    // OCR pipeline already tries 0/90/270 degree rotations server-side, and
-    // a forced client-side rotation was making the captured preview look
-    // sideways relative to what the guide box promised, which pushed the
-    // code column out of where the fast OCR tier expects to find it.
+    // OCR pipeline already tries 0/90/270 degree rotations, and a forced
+    // client-side rotation made the captured preview look sideways relative
+    // to what the guide box promised.
     const canvas = document.createElement("canvas");
     canvas.width = video.videoWidth || 1920;
     canvas.height = video.videoHeight || 1080;
@@ -276,10 +391,38 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     router.refresh();
   }
 
+  function resetLabelWizardState() {
+    setIsReviewReady(false);
+    setScannedSessionId("");
+    setScannedPartNumber("");
+    setScannedFirstBoxCodes([]);
+    setScannedLastBoxCodes([]);
+    setFirstBoxManualCodes("");
+    setLastBoxManualCodes("");
+    setFirstBoxFile(null);
+    setFirstBoxPreviewUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+
+      return null;
+    });
+    setLastBoxFile(null);
+    setLastBoxPreviewUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+
+      return null;
+    });
+    allStagesRawTextRef.current = [];
+  }
+
   async function handleStartLabelCamera() {
     setCameraError(null);
     setUploadError(null);
     setFailedOcrPreview("");
+    resetLabelWizardState();
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -296,23 +439,26 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
       setIsCameraOpen(true);
       setCameraMode("label");
-      setStatus(
-        "Camera ready. Fill the dashed box with the 2D Code column and hold steady — scanning automatically.",
-      );
+      setStatus("Camera ready. Scanning Session ID first — keep the camera open through all 4 steps.");
     } catch {
       setCameraError(
-        "Camera access failed. Check browser permissions or use file upload instead.",
+        "Camera access failed. Check browser permissions and try again.",
       );
     }
   }
 
-  function startLabelScanLoop() {
+  function setStage(stage: LabelWizardStage) {
+    labelStageRef.current = stage;
+    setLabelStage(stage);
     labelScanTextsRef.current = [];
-    labelScanPrevCodesRef.current = [];
+    labelScanPrevResultRef.current = [];
     labelScanStableCountRef.current = 0;
     labelScanAttemptCountRef.current = 0;
+  }
+
+  function startLabelScanLoop() {
+    setStage("sessionId");
     labelScanActiveRef.current = true;
-    setIsLabelScanning(true);
     scheduleNextLabelScan();
   }
 
@@ -326,19 +472,33 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     }, LABEL_SCAN_INTERVAL_MS);
   }
 
+  function extractForStage(stage: LabelWizardStage, texts: string[]) {
+    if (stage === "sessionId") {
+      return extractSessionIdCandidates(texts, { minTotalCount: 2 });
+    }
+
+    if (stage === "partNumber") {
+      return extractPartNumberCandidates(texts, { minTotalCount: 2 });
+    }
+
+    return extractCandidateCodes(texts, { minTotalCount: 2 });
+  }
+
   async function runLabelScanAttempt() {
     const video = labelVideoRef.current;
+    const stage = labelStageRef.current;
 
     if (!labelScanActiveRef.current || !video || video.readyState < 2 || !video.videoWidth) {
       scheduleNextLabelScan();
       return;
     }
 
+    const guideRegion = LABEL_STAGE_CONFIG[stage].guideRegion;
     const region = {
-      left: video.videoWidth * LABEL_GUIDE_REGION.left,
-      top: video.videoHeight * LABEL_GUIDE_REGION.top,
-      width: video.videoWidth * LABEL_GUIDE_REGION.width,
-      height: video.videoHeight * LABEL_GUIDE_REGION.height,
+      left: video.videoWidth * guideRegion.left,
+      top: video.videoHeight * guideRegion.top,
+      width: video.videoWidth * guideRegion.width,
+      height: video.videoHeight * guideRegion.height,
     };
 
     const regionCanvas = captureVideoRegion(video, region);
@@ -356,131 +516,121 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     labelScanAttemptCountRef.current += 1;
 
-    if (!labelScanActiveRef.current) {
-      // Scanning was stopped (camera closed) while this pass was running.
+    if (!labelScanActiveRef.current || labelStageRef.current !== stage) {
+      // Scanning was stopped, or a stage change already happened while this
+      // pass was in flight.
       return;
     }
 
-    // Require every candidate to be seen at least twice across the whole
-    // scan (not just the sliding-window matches, which already required
-    // this) — with dozens of attempts available, this filters out a
-    // one-off misread from a moment of camera drift without losing real
-    // codes, which get read repeatedly as long as the frame holds steady.
-    const codes = extractCandidateCodes(labelScanTextsRef.current, { minTotalCount: 2 });
-    const previous = labelScanPrevCodesRef.current;
-    const grewNewCode = codes.some((code) => !previous.includes(code));
+    // Require every candidate to be seen at least twice across this stage's
+    // attempts — filters a one-off misread from a moment of camera drift
+    // without needing to discard real accumulated evidence.
+    const results = extractForStage(stage, labelScanTextsRef.current);
+    const previous = labelScanPrevResultRef.current;
+    const grew = results.some((value) => !previous.includes(value));
 
-    labelScanPrevCodesRef.current = codes;
+    labelScanPrevResultRef.current = results;
     labelScanStableCountRef.current =
-      grewNewCode || codes.length === 0 ? 0 : labelScanStableCountRef.current + 1;
+      grew || results.length === 0 ? 0 : labelScanStableCountRef.current + 1;
 
     const isStable = labelScanStableCountRef.current >= LABEL_SCAN_PLATEAU_ATTEMPTS;
 
     if (
-      (codes.length > 0 && isStable) ||
+      (results.length > 0 && isStable) ||
       labelScanAttemptCountRef.current >= LABEL_SCAN_MAX_ATTEMPTS
     ) {
-      await finalizeLabelScan(codes, labelScanTextsRef.current.join("\n\n--- SCAN ---\n\n"));
+      await handleStageResult(stage, results, labelScanTextsRef.current);
       return;
     }
 
-    setStatus(
-      `Scanning... found ${codes.length} code${codes.length === 1 ? "" : "s"} so far. Keep the label steady.`,
-    );
+    const found =
+      stage === "firstBoxCodes" || stage === "lastBoxCodes"
+        ? `found ${results.length} code${results.length === 1 ? "" : "s"}`
+        : results[0]
+          ? `read "${results[0]}"`
+          : "still reading";
+
+    setStatus(`Scanning ${LABEL_STAGE_CONFIG[stage].title}... ${found}. Keep the label steady.`);
     scheduleNextLabelScan();
   }
 
-  async function finalizeLabelScan(codes: string[], rawText: string) {
+  async function captureBoxPhoto(): Promise<File | null> {
     const video = labelVideoRef.current;
     const baseCanvas = video ? await captureVideoFrame(video) : null;
     const canvas = baseCanvas ? await cropCanvasToContent(baseCanvas) : null;
 
-    if (canvas) {
-      const blob = await new Promise<Blob | null>((resolve) => {
-        canvas.toBlob(resolve, "image/jpeg", 0.92);
-      });
-
-      if (blob) {
-        const file = new File([blob], `label-${Date.now()}.jpg`, {
-          type: "image/jpeg",
-        });
-
-        setCapturedLabelFile(file);
-        setCapturedPreviewUrl((current) => {
-          if (current) {
-            URL.revokeObjectURL(current);
-          }
-
-          return URL.createObjectURL(file);
-        });
-      }
+    if (!canvas) {
+      return null;
     }
 
-    setLiveScanCodes(codes);
-    setLiveScanRawText(rawText);
-    stopCamera();
-    setStatus(
-      codes.length
-        ? `Found ${codes.length} code${codes.length === 1 ? "" : "s"}. Review below and press Process Label to save this session.`
-        : "Couldn't read a code automatically. Reposition and scan again, or paste the codes manually below.",
-    );
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/jpeg", 0.92);
+    });
+
+    if (!blob) {
+      return null;
+    }
+
+    return new File([blob], `label-${Date.now()}.jpg`, { type: "image/jpeg" });
   }
 
-  async function runOcrOnFile(file: File): Promise<{ codes: string[]; rawText: string }> {
-    const bitmap = await createImageBitmap(file);
-    const rotations = [0, 90, 270] as const;
-    const texts: string[] = [];
+  async function handleStageResult(stage: LabelWizardStage, results: string[], texts: string[]) {
+    allStagesRawTextRef.current.push(texts.join("\n\n--- SCAN ---\n\n"));
 
-    try {
-      for (const rotation of rotations) {
-        const canvas = document.createElement("canvas");
-        const rotated = rotation === 90 || rotation === 270;
-        canvas.width = rotated ? bitmap.height : bitmap.width;
-        canvas.height = rotated ? bitmap.width : bitmap.height;
-
-        const context = canvas.getContext("2d");
-
-        if (!context) {
-          continue;
-        }
-
-        context.save();
-
-        if (rotation === 90) {
-          context.translate(canvas.width, 0);
-          context.rotate(Math.PI / 2);
-        } else if (rotation === 270) {
-          context.translate(0, canvas.height);
-          context.rotate(-Math.PI / 2);
-        }
-
-        context.drawImage(bitmap, 0, 0);
-        context.restore();
-        preprocessForOcr(canvas);
-
-        try {
-          texts.push(await recognizeCanvas(canvas));
-        } catch {
-          // Ignore this rotation's failure and try the next one.
-        }
-
-        if (extractCandidateCodes(texts).length) {
-          break;
-        }
-      }
-    } finally {
-      bitmap.close();
+    if (stage === "sessionId") {
+      setScannedSessionId(results[0] ?? "");
+      setStage("partNumber");
+      setStatus("Session ID captured. Now frame the Part Number.");
+      scheduleNextLabelScan();
+      return;
     }
 
-    return {
-      codes: extractCandidateCodes(texts),
-      rawText: texts.join("\n\n--- OCR PASS ---\n\n"),
-    };
+    if (stage === "partNumber") {
+      setScannedPartNumber(results[0] ?? "");
+      setStage("firstBoxCodes");
+      setStatus("Part Number captured. Now frame the First Box's 2D Code column.");
+      scheduleNextLabelScan();
+      return;
+    }
+
+    if (stage === "firstBoxCodes") {
+      const file = await captureBoxPhoto();
+      setFirstBoxFile(file);
+      setFirstBoxPreviewUrl((current) => {
+        if (current) {
+          URL.revokeObjectURL(current);
+        }
+
+        return file ? URL.createObjectURL(file) : null;
+      });
+      setScannedFirstBoxCodes(results);
+      setStage("lastBoxCodes");
+      setStatus(
+        `First Box: found ${results.length} code${results.length === 1 ? "" : "s"}. Swap to the Last Box label and frame its 2D Code column.`,
+      );
+      scheduleNextLabelScan();
+      return;
+    }
+
+    // lastBoxCodes — final stage.
+    const file = await captureBoxPhoto();
+    setLastBoxFile(file);
+    setLastBoxPreviewUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+
+      return file ? URL.createObjectURL(file) : null;
+    });
+    setScannedLastBoxCodes(results);
+    stopCamera();
+    setIsReviewReady(true);
+    setStatus("Scan complete. Review the details below and save the label session.");
   }
 
   async function handleStartPartCamera() {
     if (!session) {
-      setVerifyError("Process a label first before scanning part QR codes.");
+      setVerifyError("Save a label session first before scanning part QR codes.");
       return;
     }
 
@@ -580,7 +730,12 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
   async function submitPartVerification(scannedQrValue: string) {
     if (!session) {
-      setVerifyError("Upload a label first.");
+      setVerifyError("Save a label session first.");
+      return;
+    }
+
+    if (reportOutcome) {
+      setVerifyError("This session is already closed out. Start a new label session to continue.");
       return;
     }
 
@@ -609,6 +764,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       body: JSON.stringify({
         sessionKey: session.sessionKey,
         scannedQrValue: normalizedValue,
+        remarks: remarksInput,
       }),
     });
 
@@ -619,7 +775,12 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
           scannedQrValue?: string;
           result?: "matched" | "unmatched";
           matchedLabelCode?: string | null;
+          matchedBoxLabel?: "first" | "last" | null;
+          matchedSerialIndex?: number | null;
           verifiedAt?: string;
+          sessionComplete?: boolean;
+          reportSent?: boolean;
+          reportError?: string | null;
         }
       | null;
 
@@ -643,19 +804,104 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       scannedQrValue: data.scannedQrValue,
       result: data.result,
       matchedLabelCode: data.matchedLabelCode ?? null,
+      matchedBoxLabel: data.matchedBoxLabel ?? null,
+      matchedSerialIndex: data.matchedSerialIndex ?? null,
       verifiedAt: data.verifiedAt,
     };
 
     setLastResult(record);
     setHistory((current) => [record, ...current]);
-    setStatus(
-      record.result === "matched"
-        ? "Part belongs to this label."
-        : "Part does not belong to this label.",
-    );
+
+    if (data.sessionComplete) {
+      setReportOutcome("pass");
+      setReportSent(Boolean(data.reportSent));
+      setReportError(data.reportSent ? null : data.reportError ?? "Failed to send report.");
+      setStatus("All 6 codes matched — PASS.");
+    } else {
+      setStatus(
+        record.result === "matched"
+          ? `Matched ${record.matchedBoxLabel === "first" ? "First" : "Last"} Box Serial ${record.matchedSerialIndex}.`
+          : "Part does not belong to this label.",
+      );
+    }
 
     setPartScanValue("");
     lastSubmittedValueRef.current = "";
+  }
+
+  async function handleFailSession() {
+    if (!session) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Mark this session as FAILED and email the report now? This can't be undone.",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsFinalizing(true);
+    setVerifyError(null);
+
+    const response = await fetch("/api/label-session/finalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionKey: session.sessionKey,
+        outcome: "fail",
+        remarks: remarksInput,
+      }),
+    });
+
+    const data = (await response.json().catch(() => null)) as
+      | { error?: string; reportSent?: boolean }
+      | null;
+
+    setIsFinalizing(false);
+
+    if (!response.ok) {
+      setVerifyError(data?.error ?? "Failed to send the report.");
+      return;
+    }
+
+    setReportOutcome("fail");
+    setReportSent(Boolean(data?.reportSent));
+    setReportError(data?.reportSent ? null : data?.error ?? "Failed to send the report.");
+    setStatus("Session marked FAILED.");
+  }
+
+  async function handleRetrySendReport() {
+    if (!session || !reportOutcome) {
+      return;
+    }
+
+    setIsFinalizing(true);
+
+    const response = await fetch("/api/label-session/finalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionKey: session.sessionKey,
+        outcome: reportOutcome,
+        remarks: remarksInput,
+      }),
+    });
+
+    const data = (await response.json().catch(() => null)) as
+      | { error?: string; reportSent?: boolean }
+      | null;
+
+    setIsFinalizing(false);
+
+    if (!response.ok) {
+      setReportError(data?.error ?? "Failed to send the report.");
+      return;
+    }
+
+    setReportSent(Boolean(data?.reportSent));
+    setReportError(data?.reportSent ? null : data?.error ?? "Failed to send the report.");
   }
 
   function queueAutoSubmit(nextValue: string) {
@@ -686,50 +932,31 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setFailedOcrPreview("");
     setLastResult(null);
     setHistory([]);
+    setReportOutcome(null);
+    setReportSent(false);
+    setReportError(null);
+
+    if (!firstBoxFile || !lastBoxFile) {
+      setUploadError("Scan both the First Box and Last Box labels before saving.");
+      return;
+    }
+
     setIsUploading(true);
     setStatus("Saving label session...");
 
     const form = event.currentTarget;
     const formData = new FormData(form);
-    const uploadedFile = formData.get("file");
-    const isCapturedFile =
-      capturedLabelFile instanceof File &&
-      !(uploadedFile instanceof File && uploadedFile.size > 0);
-    const selectedFile = isCapturedFile ? capturedLabelFile : uploadedFile;
 
-    if (!(selectedFile instanceof File) || selectedFile.size === 0) {
-      setIsUploading(false);
-      setUploadError("Choose a label image or scan one with the camera.");
-      setStatus("Waiting for a label image.");
-      return;
-    }
-
-    // The live camera scan already extracted codes client-side. A freshly
-    // picked file hasn't been read yet — OCR it once (client-side, no
-    // server round trip) before submitting.
-    let codes = isCapturedFile ? liveScanCodes : [];
-    let rawOcrText = isCapturedFile ? liveScanRawText : "";
-
-    if (!isCapturedFile) {
-      setStatus("Reading codes from the uploaded image...");
-
-      try {
-        const result = await runOcrOnFile(selectedFile);
-        codes = result.codes;
-        rawOcrText = result.rawText;
-      } catch {
-        // Fall through with no codes — the manual fallback and the
-        // server's "no codes found" message still apply.
-      }
-
-      setStatus("Saving label session...");
-    }
-
-    formData.set("file", selectedFile);
-    formData.set("sourceType", isCapturedFile ? "camera" : "upload");
-    formData.set("manualCodes", manualCodesInput);
-    formData.set("codes", JSON.stringify(codes));
-    formData.set("rawOcrText", rawOcrText);
+    formData.set("sourceType", "camera");
+    formData.set("sessionIdCode", scannedSessionId);
+    formData.set("partNumber", scannedPartNumber);
+    formData.set("firstBoxFile", firstBoxFile);
+    formData.set("lastBoxFile", lastBoxFile);
+    formData.set("firstBoxCodes", JSON.stringify(scannedFirstBoxCodes));
+    formData.set("lastBoxCodes", JSON.stringify(scannedLastBoxCodes));
+    formData.set("firstBoxManualCodes", firstBoxManualCodes);
+    formData.set("lastBoxManualCodes", lastBoxManualCodes);
+    formData.set("rawOcrText", allStagesRawTextRef.current.join("\n\n=== STAGE ===\n\n"));
 
     const response = await fetch("/api/label-session", {
       method: "POST",
@@ -740,8 +967,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       | {
           error?: string;
           sessionKey?: string;
-          codes?: string[];
-          imageRef?: string;
+          sessionIdCode?: string;
+          partNumber?: string;
+          firstBoxCodes?: string[];
+          lastBoxCodes?: string[];
           storageMode?: string;
           ocrPreview?: string;
         }
@@ -749,36 +978,28 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     setIsUploading(false);
 
-    if (!response.ok || !data?.sessionKey || !data.codes) {
+    if (!response.ok || !data?.sessionKey || !data.firstBoxCodes || !data.lastBoxCodes) {
       setUploadError(data?.error ?? "Label processing failed.");
       setFailedOcrPreview(data?.ocrPreview ?? "");
-      setStatus("Waiting for a clearer label upload.");
+      setStatus("Waiting for a clearer label scan.");
       return;
     }
 
     setSession({
       sessionKey: data.sessionKey,
-      codes: data.codes,
-      imageRef: data.imageRef ?? "",
+      sessionIdCode: data.sessionIdCode ?? scannedSessionId,
+      partNumber: data.partNumber ?? scannedPartNumber,
+      firstBoxCodes: data.firstBoxCodes,
+      lastBoxCodes: data.lastBoxCodes,
       storageMode: data.storageMode ?? "unknown",
-      ocrPreview: data.ocrPreview ?? "",
     });
     setShowCodes(false);
     setShowHistory(false);
-    setCapturedLabelFile(null);
-    setManualCodesInput("");
     setFailedOcrPreview("");
-    setLiveScanCodes([]);
-    setLiveScanRawText("");
-    setCapturedPreviewUrl((current) => {
-      if (current) {
-        URL.revokeObjectURL(current);
-      }
-
-      return null;
-    });
+    setRemarksInput("");
+    resetLabelWizardState();
     form.reset();
-    setStatus("Label ready. Start scanning part QR values.");
+    setStatus("Label session ready. Start scanning parts.");
   }
 
   async function handleVerify(event: FormEvent<HTMLFormElement>) {
@@ -792,6 +1013,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     await submitPartVerification(partScanValue);
   }
 
+  const currentStageIndex = LABEL_STAGE_SEQUENCE.indexOf(labelStage);
+
   return (
     <main className="shell">
       <section className="hero">
@@ -800,9 +1023,9 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
             <div className="eyebrow">QA Workspace</div>
             <h1>Verify Many Parts Against One Label</h1>
             <p>
-              Signed in as <strong>{user.name}</strong>. Upload one label or capture
-              it live, review the extracted 11-character codes, and then scan as
-              many parts as needed against that same label session.
+              Signed in as <strong>{user.name}</strong>. Scan the First Box and Last
+              Box labels (Session ID, Part Number, and 3 codes each), then verify
+              all 6 parts — a report emails automatically once every part matches.
             </p>
           </div>
           <button className="button secondary hero-signout" type="button" onClick={handleLogout}>
@@ -817,10 +1040,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
             <div className="split">
               <div>
                 <div className="mobile-step">Step 1 · Label</div>
-                <h2>1. Start Label Session</h2>
+                <h2>1. Scan Label Session</h2>
                 <p className="muted">
-                  You can upload an image file or use the device camera to take
-                  the label photo directly on the QA page.
+                  Point the camera at the First Box label, then the Last Box label.
+                  Scanning advances through each field automatically.
                 </p>
               </div>
             </div>
@@ -831,19 +1054,20 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                 <input id="station" name="station" type="text" placeholder="QA-01" />
               </div>
 
-              <div className="button-row" style={{ marginBottom: 16 }}>
-                <button className="button ghost" type="button" onClick={handleStartLabelCamera}>
-                  Open Camera
-                </button>
-                {isCameraOpen && cameraMode === "label" ? (
-                  <button className="button secondary" type="button" onClick={stopCamera}>
-                    Close Camera
+              {!isCameraOpen && !isReviewReady ? (
+                <div className="button-row" style={{ marginBottom: 16 }}>
+                  <button className="button ghost" type="button" onClick={handleStartLabelCamera}>
+                    Open Camera
                   </button>
-                ) : null}
-              </div>
+                </div>
+              ) : null}
 
               {isCameraOpen && cameraMode === "label" ? (
                 <div className="card" style={{ marginBottom: 16, padding: 16 }}>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    Step {currentStageIndex + 1} of {LABEL_STAGE_SEQUENCE.length}:{" "}
+                    <strong>{LABEL_STAGE_CONFIG[labelStage].title}</strong>
+                  </p>
                   <div
                     className="label-camera-frame"
                     style={{
@@ -870,13 +1094,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       className="label-camera-guide"
                       style={{
                         position: "absolute",
-                        // The client-side OCR scan crops exactly this region
-                        // of each frame — keep this in sync with
-                        // LABEL_GUIDE_REGION.
-                        left: `${LABEL_GUIDE_REGION.left * 100}%`,
-                        top: `${LABEL_GUIDE_REGION.top * 100}%`,
-                        width: `${LABEL_GUIDE_REGION.width * 100}%`,
-                        height: `${LABEL_GUIDE_REGION.height * 100}%`,
+                        left: `${LABEL_STAGE_CONFIG[labelStage].guideRegion.left * 100}%`,
+                        top: `${LABEL_STAGE_CONFIG[labelStage].guideRegion.top * 100}%`,
+                        width: `${LABEL_STAGE_CONFIG[labelStage].guideRegion.width * 100}%`,
+                        height: `${LABEL_STAGE_CONFIG[labelStage].guideRegion.height * 100}%`,
                         border: "3px dashed #4ade80",
                         borderRadius: 12,
                         boxSizing: "border-box",
@@ -900,56 +1121,133 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                         pointerEvents: "none",
                       }}
                     >
-                      {isLabelScanning
-                        ? "Scanning automatically — fit the 2D Code column in the box."
-                        : "Fit the 2D Code column inside the dashed box."}
+                      {LABEL_STAGE_CONFIG[labelStage].hint}
                     </div>
+                  </div>
+                  <div className="button-row" style={{ marginTop: 14 }}>
+                    <button className="button secondary" type="button" onClick={stopCamera}>
+                      Cancel Scan
+                    </button>
                   </div>
                 </div>
               ) : null}
 
-              {capturedPreviewUrl ? (
-                <div style={{ marginBottom: 16 }}>
-                  <p className="muted">Captured label preview</p>
-                  <img
-                    src={capturedPreviewUrl}
-                    alt="Captured label"
-                    style={{
-                      width: "100%",
-                      borderRadius: 18,
-                      border: "1px solid var(--line)",
-                    }}
-                  />
+              {isReviewReady ? (
+                <div className="card" style={{ marginBottom: 16, padding: 16 }}>
+                  <p className="muted" style={{ marginTop: 0 }}>
+                    Review the scanned details, correct anything that looks wrong,
+                    then save.
+                  </p>
+
+                  <div className="field">
+                    <label htmlFor="sessionIdCode">Session ID</label>
+                    <input
+                      id="sessionIdCode"
+                      type="text"
+                      placeholder="20260801-0001"
+                      value={scannedSessionId}
+                      onChange={(event) => setScannedSessionId(event.target.value.toUpperCase())}
+                    />
+                    {!SESSION_ID_PATTERN.test(scannedSessionId) ? (
+                      <small className="muted">Expected format: YYYYMMDD-NNNN</small>
+                    ) : null}
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="partNumber">Part Number</label>
+                    <input
+                      id="partNumber"
+                      type="text"
+                      placeholder="M034-002816"
+                      value={scannedPartNumber}
+                      onChange={(event) => setScannedPartNumber(event.target.value.toUpperCase())}
+                    />
+                    {!PART_NUMBER_PATTERN.test(scannedPartNumber) ? (
+                      <small className="muted">Expected format: LNNN-NNNNNN</small>
+                    ) : null}
+                  </div>
+
+                  <div className="split" style={{ gap: 16, alignItems: "flex-start" }}>
+                    <div style={{ flex: 1 }}>
+                      <p className="muted" style={{ marginBottom: 4 }}>
+                        <strong>First Box codes</strong> ({scannedFirstBoxCodes.length} found)
+                      </p>
+                      {firstBoxPreviewUrl ? (
+                        <img
+                          src={firstBoxPreviewUrl}
+                          alt="First Box label"
+                          style={{ width: "100%", borderRadius: 12, marginBottom: 8 }}
+                        />
+                      ) : null}
+                      <div className="code-list">
+                        {scannedFirstBoxCodes.map((code) => (
+                          <div className="code-pill" key={code}>
+                            <span className="mono">{code}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="field">
+                        <label htmlFor="firstBoxManualCodes">Manual fallback</label>
+                        <textarea
+                          id="firstBoxManualCodes"
+                          rows={3}
+                          placeholder="Paste codes if scanning missed any"
+                          value={firstBoxManualCodes}
+                          onChange={(event) =>
+                            setFirstBoxManualCodes(event.target.value.toUpperCase())
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ flex: 1 }}>
+                      <p className="muted" style={{ marginBottom: 4 }}>
+                        <strong>Last Box codes</strong> ({scannedLastBoxCodes.length} found)
+                      </p>
+                      {lastBoxPreviewUrl ? (
+                        <img
+                          src={lastBoxPreviewUrl}
+                          alt="Last Box label"
+                          style={{ width: "100%", borderRadius: 12, marginBottom: 8 }}
+                        />
+                      ) : null}
+                      <div className="code-list">
+                        {scannedLastBoxCodes.map((code) => (
+                          <div className="code-pill" key={code}>
+                            <span className="mono">{code}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="field">
+                        <label htmlFor="lastBoxManualCodes">Manual fallback</label>
+                        <textarea
+                          id="lastBoxManualCodes"
+                          rows={3}
+                          placeholder="Paste codes if scanning missed any"
+                          value={lastBoxManualCodes}
+                          onChange={(event) =>
+                            setLastBoxManualCodes(event.target.value.toUpperCase())
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="button-row" style={{ marginTop: 12 }}>
+                    <button
+                      className="button secondary"
+                      type="button"
+                      onClick={handleStartLabelCamera}
+                    >
+                      Rescan
+                    </button>
+                  </div>
                 </div>
               ) : null}
 
-              <div className="field">
-                <label htmlFor="file">Label image upload</label>
-                <input id="file" name="file" type="file" accept="image/*" />
-              </div>
-
-              <div className="field">
-                <label htmlFor="manualCodes">
-                  Manual label codes fallback (optional)
-                </label>
-                <textarea
-                  id="manualCodes"
-                  name="manualCodes"
-                  rows={4}
-                  placeholder="Paste 11-character codes here if OCR misses them, for example:&#10;J16262915HQ&#10;J16262915HZ&#10;J16262915HW"
-                  value={manualCodesInput}
-                  onChange={(event) => setManualCodesInput(event.target.value.toUpperCase())}
-                />
-                <small className="muted">
-                  {manualCodeCount
-                    ? `${manualCodeCount} manual code${manualCodeCount === 1 ? "" : "s"} ready as fallback`
-                    : "Leave blank to use OCR only."}
-                </small>
-              </div>
-
               <div className="button-row">
-                <button className="button" type="submit" disabled={isUploading}>
-                  {isUploading ? "Processing label..." : "Process Label"}
+                <button className="button" type="submit" disabled={isUploading || !canSaveSession}>
+                  {isUploading ? "Saving..." : "Save Label Session"}
                 </button>
               </div>
             </form>
@@ -975,11 +1273,26 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
           <section className="card">
             <div className="mobile-step">Step 2 · Part Scan</div>
-            <h2>2. Verify Part QR</h2>
+            <h2>2. Verify Parts (First 3 + Last 3)</h2>
             <p className="muted">
               Scanner gun and camera scans verify automatically. Manual typing can
               still verify on <span className="mono">Enter</span>.
             </p>
+
+            {session ? (
+              <div className="code-list" style={{ marginBottom: 16 }}>
+                {slotStatuses.map((slot) => (
+                  <div className="code-pill split" key={`${slot.box}-${slot.serialIndex}`}>
+                    <span>
+                      {slot.box === "first" ? "First" : "Last"} Box · Serial {slot.serialIndex}
+                    </span>
+                    <small className={slot.match ? "result match" : ""}>
+                      {slot.match ? `MATCH · ${slot.match.scannedQrValue}` : "PENDING"}
+                    </small>
+                  </div>
+                ))}
+              </div>
+            ) : null}
 
             <form onSubmit={handleVerify}>
               <div className="button-row" style={{ marginBottom: 16 }}>
@@ -987,7 +1300,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                   className="button ghost"
                   type="button"
                   onClick={handleStartPartCamera}
-                  disabled={!session}
+                  disabled={!session || Boolean(reportOutcome)}
                 >
                   Open Part QR Camera
                 </button>
@@ -1072,7 +1385,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                   type="text"
                   placeholder="Scan or type QR value"
                   required
-                  disabled={!session}
+                  disabled={!session || Boolean(reportOutcome)}
                   value={partScanValue}
                   onChange={(event) => {
                     const nextValue = event.target.value.toUpperCase();
@@ -1081,9 +1394,53 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                   }}
                 />
               </div>
+
+              <div className="field">
+                <label htmlFor="remarks">Remarks (optional, included in the report)</label>
+                <input
+                  id="remarks"
+                  type="text"
+                  placeholder="-"
+                  disabled={!session}
+                  value={remarksInput}
+                  onChange={(event) => setRemarksInput(event.target.value)}
+                />
+              </div>
             </form>
 
             {verifyError ? <p className="error">{verifyError}</p> : null}
+
+            {reportOutcome ? (
+              <div className={`notice ${reportOutcome === "pass" ? "" : "notice-fail"}`}>
+                <strong>{reportOutcome === "pass" ? "PASS" : "FAIL"}</strong> — session closed.{" "}
+                {reportSent
+                  ? "Report emailed."
+                  : `Report not sent${reportError ? `: ${reportError}` : "."}`}
+                {!reportSent ? (
+                  <div className="button-row" style={{ marginTop: 8 }}>
+                    <button
+                      className="button secondary"
+                      type="button"
+                      onClick={handleRetrySendReport}
+                      disabled={isFinalizing}
+                    >
+                      {isFinalizing ? "Sending..." : "Retry Sending Report"}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : session ? (
+              <div className="button-row" style={{ marginBottom: 16 }}>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={handleFailSession}
+                  disabled={isFinalizing}
+                >
+                  {isFinalizing ? "Sending..." : "Report Mismatch (Fail Session)"}
+                </button>
+              </div>
+            ) : null}
 
             {lastResult ? (
               <div
@@ -1095,7 +1452,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                 </div>
                 <div className="detail">
                   {lastResult.result === "matched"
-                    ? "This part belongs to the current label."
+                    ? `Matched ${lastResult.matchedBoxLabel === "first" ? "First" : "Last"} Box Serial ${lastResult.matchedSerialIndex}.`
                     : "This part does not belong to the current label."}
                 </div>
                 <div className="qr mono">{lastResult.scannedQrValue}</div>
@@ -1121,10 +1478,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
               onClick={() => setShowCodes((value) => !value)}
             >
               <span>
-                <strong>Extracted Label Codes</strong>
+                <strong>Label Session Details</strong>
                 <small>
                   {session
-                    ? `${uniqueCodeCount} code${uniqueCodeCount === 1 ? "" : "s"} extracted from this label`
+                    ? `Session ${session.sessionIdCode} · Part ${session.partNumber}`
                     : "No active label session yet"}
                 </small>
               </span>
@@ -1134,10 +1491,20 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
             {showCodes && session ? (
               <div className="section-body">
                 <p className="muted">
-                  Session: <span className="mono">{session.sessionKey}</span>
+                  Internal key: <span className="mono">{session.sessionKey}</span>
                 </p>
+                <p className="muted">First Box codes</p>
                 <div className="code-list">
-                  {session.codes.map((code) => (
+                  {session.firstBoxCodes.map((code) => (
+                    <div className="code-pill split" key={code}>
+                      <span className="mono">{code}</span>
+                      <small>valid code</small>
+                    </div>
+                  ))}
+                </div>
+                <p className="muted">Last Box codes</p>
+                <div className="code-list">
+                  {session.lastBoxCodes.map((code) => (
                     <div className="code-pill split" key={code}>
                       <span className="mono">{code}</span>
                       <small>valid code</small>
@@ -1186,7 +1553,9 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                         </div>
                         <small>
                           {new Date(item.verifiedAt).toLocaleString()}
-                          {item.matchedLabelCode ? ` · matched ${item.matchedLabelCode}` : ""}
+                          {item.matchedBoxLabel
+                            ? ` · ${item.matchedBoxLabel === "first" ? "First" : "Last"} Box Serial ${item.matchedSerialIndex}`
+                            : ""}
                         </small>
                       </div>
                     ))

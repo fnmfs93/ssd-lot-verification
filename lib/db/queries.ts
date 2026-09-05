@@ -71,14 +71,23 @@ export async function deleteSessionByToken(token: string) {
   await db.delete(sessions).where(eq(sessions.token, token));
 }
 
+type LabelCodeInput = {
+  codeValue: string;
+  boxLabel: "first" | "last";
+  serialIndex: number;
+};
+
 type LabelSessionInput = {
   qaUserId: string;
   qaUserName: string;
   qaStation: string | null;
   sourceType: string;
-  imageRef: string;
-  extractedCodes: string[];
+  sessionIdCode: string;
+  partNumber: string;
+  firstBoxImageRef: string;
+  lastBoxImageRef: string;
   rawOcrText: string;
+  codes: LabelCodeInput[];
 };
 
 export async function createLabelSession(input: LabelSessionInput) {
@@ -94,15 +103,23 @@ export async function createLabelSession(input: LabelSessionInput) {
       qaUserName: input.qaUserName,
       qaStation: input.qaStation,
       sourceType: input.sourceType,
-      imageRef: input.imageRef,
+      // Legacy column, kept populated for any old code/reports still
+      // reading it — the box-specific refs below are the source of truth.
+      imageRef: input.firstBoxImageRef,
       rawOcrText: input.rawOcrText,
+      sessionIdCode: input.sessionIdCode,
+      partNumber: input.partNumber,
+      firstBoxImageRef: input.firstBoxImageRef,
+      lastBoxImageRef: input.lastBoxImageRef,
     }),
-    ...input.extractedCodes.map((codeValue, index) =>
+    ...input.codes.map((code, index) =>
       db.insert(labelCodes).values({
         id: randomUUID(),
         labelSessionId: id,
-        codeValue,
+        codeValue: code.codeValue,
         rowIndex: index,
+        boxLabel: code.boxLabel,
+        serialIndex: code.serialIndex,
       }),
     ),
     db.insert(auditLog).values({
@@ -112,8 +129,10 @@ export async function createLabelSession(input: LabelSessionInput) {
       entityType: "label_session",
       entityId: id,
       payload: JSON.stringify({
-        codeCount: input.extractedCodes.length,
+        codeCount: input.codes.length,
         sourceType: input.sourceType,
+        sessionIdCode: input.sessionIdCode,
+        partNumber: input.partNumber,
       }),
     }),
   ]);
@@ -144,16 +163,18 @@ export async function recordPartVerification(input: {
   const codes = await db
     .select({
       codeValue: labelCodes.codeValue,
+      boxLabel: labelCodes.boxLabel,
+      serialIndex: labelCodes.serialIndex,
     })
     .from(labelCodes)
     .where(eq(labelCodes.labelSessionId, session.id))
     .orderBy(asc(labelCodes.rowIndex));
 
-  const matchedCode =
-    codes.find((entry) => entry.codeValue === input.scannedQrValue)?.codeValue ?? null;
+  const matchedCodeEntry =
+    codes.find((entry) => entry.codeValue === input.scannedQrValue) ?? null;
 
   const verificationId = randomUUID();
-  const result = matchedCode ? "matched" : "unmatched";
+  const result = matchedCodeEntry ? "matched" : "unmatched";
   const verifiedAt = new Date();
 
   await db.batch([
@@ -164,7 +185,9 @@ export async function recordPartVerification(input: {
       qaUserName: input.qaUserName,
       scannedQrValue: input.scannedQrValue,
       result,
-      matchedLabelCode: matchedCode,
+      matchedLabelCode: matchedCodeEntry?.codeValue ?? null,
+      matchedBoxLabel: matchedCodeEntry?.boxLabel ?? null,
+      matchedSerialIndex: matchedCodeEntry?.serialIndex ?? null,
       verifiedAt,
     }),
     db.insert(auditLog).values({
@@ -180,13 +203,81 @@ export async function recordPartVerification(input: {
     }),
   ]);
 
+  // The fixed First-3/Last-3 sampling structure means the session is
+  // "complete" once every one of the 6 label codes has been claimed by at
+  // least one matched verification — a duplicate scan of an already-claimed
+  // code still reports as a match, it just doesn't count toward this.
+  const matchedVerifications = await db
+    .select({ matchedLabelCode: partVerifications.matchedLabelCode })
+    .from(partVerifications)
+    .where(eq(partVerifications.labelSessionId, session.id));
+
+  const claimedCodes = new Set(
+    matchedVerifications
+      .map((entry) => entry.matchedLabelCode)
+      .filter((value): value is string => Boolean(value)),
+  );
+
+  const sessionComplete =
+    codes.length > 0 && codes.every((code) => claimedCodes.has(code.codeValue));
+
   return {
     id: verificationId,
     scannedQrValue: input.scannedQrValue,
     result: result as "matched" | "unmatched",
-    matchedLabelCode: matchedCode,
+    matchedLabelCode: matchedCodeEntry?.codeValue ?? null,
+    matchedBoxLabel: matchedCodeEntry?.boxLabel ?? null,
+    matchedSerialIndex: matchedCodeEntry?.serialIndex ?? null,
     verifiedAt: verifiedAt.toISOString(),
+    sessionComplete,
   };
+}
+
+export async function updateSessionRemarks(sessionKey: string, remarks: string) {
+  const db = getDb();
+  await db
+    .update(labelSessions)
+    .set({ remarks, updatedAt: new Date() })
+    .where(eq(labelSessions.sessionKey, sessionKey));
+}
+
+export async function getLabelSessionReportData(sessionKey: string) {
+  const db = getDb();
+  const [session] = await db
+    .select()
+    .from(labelSessions)
+    .where(eq(labelSessions.sessionKey, sessionKey))
+    .limit(1);
+
+  if (!session) {
+    return null;
+  }
+
+  const codes = await db
+    .select()
+    .from(labelCodes)
+    .where(eq(labelCodes.labelSessionId, session.id))
+    .orderBy(asc(labelCodes.rowIndex));
+
+  const verifications = await db
+    .select()
+    .from(partVerifications)
+    .where(eq(partVerifications.labelSessionId, session.id))
+    .orderBy(asc(partVerifications.verifiedAt));
+
+  return { session, codes, verifications };
+}
+
+export async function markReportSent(sessionId: string, error: string | null) {
+  const db = getDb();
+  await db
+    .update(labelSessions)
+    .set({
+      reportSentAt: error ? null : new Date(),
+      reportEmailError: error,
+      updatedAt: new Date(),
+    })
+    .where(eq(labelSessions.id, sessionId));
 }
 
 export async function listSessionVerifications(sessionKey: string) {

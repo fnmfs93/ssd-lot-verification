@@ -334,6 +334,12 @@ video {
   color: #336042;
 }
 
+.notice.notice-fail {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .ocr-preview {
   margin-top: 10px;
   white-space: pre-wrap;

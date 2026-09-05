@@ -145,3 +145,45 @@ export function extractCandidateCodes(texts: string[], options?: { minTotalCount
     })
     .map(([value]) => value);
 }
+
+// Session ID and Part Number both print with their separator dash intact
+// (unlike the 2D code, which OCR sometimes splits with a stray space), so a
+// direct regex scan over the raw text is enough — no sliding-window
+// normalization needed.
+const SESSION_ID_PATTERN = /\b\d{8}-\d{4}\b/g;
+const PART_NUMBER_PATTERN = /\b[A-Z]\d{3}-\d{6}\b/g;
+
+function extractPatternCandidates(texts: string[], pattern: RegExp, minTotalCount: number) {
+  const counts = new Map<string, number>();
+
+  for (const text of texts) {
+    const matches = text.toUpperCase().match(pattern) ?? [];
+
+    for (const match of matches) {
+      counts.set(match, (counts.get(match) ?? 0) + 1);
+    }
+  }
+
+  return [...counts.entries()]
+    .filter(([, count]) => count >= minTotalCount)
+    .sort((left, right) => {
+      const countDelta = right[1] - left[1];
+
+      if (countDelta !== 0) {
+        return countDelta;
+      }
+
+      return left[0].localeCompare(right[0]);
+    })
+    .map(([value]) => value);
+}
+
+/** Session ID format: YYYYMMDD-NNNN, e.g. 20260801-0001. */
+export function extractSessionIdCandidates(texts: string[], options?: { minTotalCount?: number }) {
+  return extractPatternCandidates(texts, SESSION_ID_PATTERN, options?.minTotalCount ?? 1);
+}
+
+/** Part Number format: one letter + 3 digits + 6 digits, e.g. M034-002816. */
+export function extractPartNumberCandidates(texts: string[], options?: { minTotalCount?: number }) {
+  return extractPatternCandidates(texts, PART_NUMBER_PATTERN, options?.minTotalCount ?? 1);
+}

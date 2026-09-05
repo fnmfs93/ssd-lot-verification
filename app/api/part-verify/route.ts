@@ -1,9 +1,16 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth/session";
-import { recordPartVerification } from "@/lib/db/queries";
+import {
+  getLabelSessionReportData,
+  markReportSent,
+  recordPartVerification,
+  updateSessionRemarks,
+} from "@/lib/db/queries";
+import { buildReportRows, sendVerificationReport } from "@/lib/email/report";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 const schema = z.object({
   sessionKey: z.string().min(10),
@@ -12,6 +19,7 @@ const schema = z.object({
     .trim()
     .min(3)
     .transform((value) => value.toUpperCase()),
+  remarks: z.string().trim().max(500).optional(),
 });
 
 export async function POST(request: Request) {
@@ -31,6 +39,10 @@ export async function POST(request: Request) {
     );
   }
 
+  if (parsed.data.remarks !== undefined) {
+    await updateSessionRemarks(parsed.data.sessionKey, parsed.data.remarks);
+  }
+
   const result = await recordPartVerification({
     qaUserId: user.id,
     qaUserName: user.name,
@@ -45,5 +57,30 @@ export async function POST(request: Request) {
     );
   }
 
-  return NextResponse.json(result);
+  let reportSent = false;
+  let reportError: string | null = null;
+
+  if (result.sessionComplete) {
+    const report = await getLabelSessionReportData(parsed.data.sessionKey);
+
+    if (report) {
+      try {
+        await sendVerificationReport({
+          sessionIdCode: report.session.sessionIdCode ?? report.session.sessionKey,
+          partNumber: report.session.partNumber ?? "-",
+          qaUserName: report.session.qaUserName,
+          outcome: "pass",
+          remarks: report.session.remarks ?? "",
+          rows: buildReportRows(report.codes, report.verifications),
+        });
+        await markReportSent(report.session.id, null);
+        reportSent = true;
+      } catch (error) {
+        reportError = error instanceof Error ? error.message : "Failed to send report email.";
+        await markReportSent(report.session.id, reportError);
+      }
+    }
+  }
+
+  return NextResponse.json({ ...result, reportSent, reportError });
 }

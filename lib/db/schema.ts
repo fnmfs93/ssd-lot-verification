@@ -36,6 +36,15 @@ export const labelSessions = sqliteTable("label_sessions", {
   imageRef: text("image_ref").notNull(),
   rawOcrText: text("raw_ocr_text").notNull(),
   ocrStatus: text("ocr_status").notNull().default("processed"),
+  // Printed on the physical label — distinct from `sessionKey`, which is
+  // this app's own internal identifier.
+  sessionIdCode: text("session_id_code"),
+  partNumber: text("part_number"),
+  remarks: text("remarks"),
+  firstBoxImageRef: text("first_box_image_ref"),
+  lastBoxImageRef: text("last_box_image_ref"),
+  reportSentAt: integer("report_sent_at", { mode: "timestamp_ms" }),
+  reportEmailError: text("report_email_error"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .default(sql`(unixepoch() * 1000)`),
@@ -51,6 +60,10 @@ export const labelCodes = sqliteTable("label_codes", {
     .references(() => labelSessions.id, { onDelete: "cascade" }),
   codeValue: text("code_value").notNull(),
   rowIndex: integer("row_index").notNull(),
+  // "first" | "last" + 1-3 — which box/serial slot this code fills out of
+  // the fixed First-3 / Last-3 sampling structure.
+  boxLabel: text("box_label"),
+  serialIndex: integer("serial_index"),
 });
 
 export const partVerifications = sqliteTable("part_verifications", {
@@ -65,6 +78,8 @@ export const partVerifications = sqliteTable("part_verifications", {
   scannedQrValue: text("scanned_qr_value").notNull(),
   result: text("result").notNull(),
   matchedLabelCode: text("matched_label_code"),
+  matchedBoxLabel: text("matched_box_label"),
+  matchedSerialIndex: integer("matched_serial_index"),
   verifiedAt: integer("verified_at", { mode: "timestamp_ms" })
     .notNull()
     .default(sql`(unixepoch() * 1000)`),
