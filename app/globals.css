@@ -217,6 +217,12 @@ video {
   color: var(--accent-strong);
 }
 
+.button.small {
+  min-height: auto;
+  padding: 6px 14px;
+  font-size: 0.82rem;
+}
+
 .result {
   display: inline-flex;
   align-items: center;

@@ -127,6 +127,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const labelScanAttemptCountRef = useRef(0);
   const labelStageRef = useRef<LabelWizardStage>("sessionId");
   const allStagesRawTextRef = useRef<string[]>([]);
+  const isRescanOnlyRef = useRef(false);
+  const rescanStageRef = useRef<LabelWizardStage | null>(null);
 
   const [session, setSession] = useState<SessionState | null>(null);
   const [history, setHistory] = useState<VerificationRecord[]>([]);
@@ -140,6 +142,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [cameraMode, setCameraMode] = useState<"label" | "part" | null>(null);
   const [labelStage, setLabelStage] = useState<LabelWizardStage>("sessionId");
+  const [isRescanMode, setIsRescanMode] = useState(false);
   const [lastResult, setLastResult] = useState<VerificationRecord | null>(null);
   const [partScanValue, setPartScanValue] = useState("");
   const [showCodes, setShowCodes] = useState(false);
@@ -153,10 +156,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [scannedPartNumber, setScannedPartNumber] = useState("");
   const [scannedFirstBoxCodes, setScannedFirstBoxCodes] = useState<string[]>([]);
   const [scannedLastBoxCodes, setScannedLastBoxCodes] = useState<string[]>([]);
+  // Captured silently for image storage — never shown in the UI, just the
+  // scanned values (same as Session ID / Part Number).
   const [firstBoxFile, setFirstBoxFile] = useState<File | null>(null);
-  const [firstBoxPreviewUrl, setFirstBoxPreviewUrl] = useState<string | null>(null);
   const [lastBoxFile, setLastBoxFile] = useState<File | null>(null);
-  const [lastBoxPreviewUrl, setLastBoxPreviewUrl] = useState<string | null>(null);
   const [firstBoxManualCodes, setFirstBoxManualCodes] = useState("");
   const [lastBoxManualCodes, setLastBoxManualCodes] = useState("");
   const [failedOcrPreview, setFailedOcrPreview] = useState("");
@@ -229,7 +232,13 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
         await video.play();
 
         if (cameraMode === "label") {
-          startLabelScanLoop();
+          if (isRescanOnlyRef.current && rescanStageRef.current) {
+            setStage(rescanStageRef.current);
+            labelScanActiveRef.current = true;
+            scheduleNextLabelScan();
+          } else {
+            startLabelScanLoop();
+          }
         }
       } catch {
         setCameraError(
@@ -251,22 +260,6 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       }
     };
   }, []);
-
-  useEffect(() => {
-    return () => {
-      if (firstBoxPreviewUrl) {
-        URL.revokeObjectURL(firstBoxPreviewUrl);
-      }
-    };
-  }, [firstBoxPreviewUrl]);
-
-  useEffect(() => {
-    return () => {
-      if (lastBoxPreviewUrl) {
-        URL.revokeObjectURL(lastBoxPreviewUrl);
-      }
-    };
-  }, [lastBoxPreviewUrl]);
 
   function stopCamera() {
     if (scanLoopRef.current) {
@@ -400,21 +393,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setFirstBoxManualCodes("");
     setLastBoxManualCodes("");
     setFirstBoxFile(null);
-    setFirstBoxPreviewUrl((current) => {
-      if (current) {
-        URL.revokeObjectURL(current);
-      }
-
-      return null;
-    });
     setLastBoxFile(null);
-    setLastBoxPreviewUrl((current) => {
-      if (current) {
-        URL.revokeObjectURL(current);
-      }
-
-      return null;
-    });
     allStagesRawTextRef.current = [];
   }
 
@@ -456,7 +435,26 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     labelScanAttemptCountRef.current = 0;
   }
 
+  function handleCancelLabelScan() {
+    const wasRescan = isRescanOnlyRef.current;
+    stopCamera();
+    isRescanOnlyRef.current = false;
+    rescanStageRef.current = null;
+    setIsRescanMode(false);
+
+    if (wasRescan) {
+      // Cancelling a targeted rescan should return to the review screen
+      // with the previous value intact, not strand the user on a blank
+      // "Open Camera" state.
+      setIsReviewReady(true);
+      setStatus("Rescan cancelled — previous value kept.");
+    }
+  }
+
   function startLabelScanLoop() {
+    isRescanOnlyRef.current = false;
+    rescanStageRef.current = null;
+    setIsRescanMode(false);
     setStage("sessionId");
     labelScanActiveRef.current = true;
     scheduleNextLabelScan();
@@ -574,58 +572,95 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     return new File([blob], `label-${Date.now()}.jpg`, { type: "image/jpeg" });
   }
 
+  function applyStageResult(stage: LabelWizardStage, results: string[]) {
+    if (stage === "sessionId") {
+      setScannedSessionId(results[0] ?? "");
+    } else if (stage === "partNumber") {
+      setScannedPartNumber(results[0] ?? "");
+    } else if (stage === "firstBoxCodes") {
+      setScannedFirstBoxCodes(results);
+    } else {
+      setScannedLastBoxCodes(results);
+    }
+  }
+
   async function handleStageResult(stage: LabelWizardStage, results: string[], texts: string[]) {
     allStagesRawTextRef.current.push(texts.join("\n\n--- SCAN ---\n\n"));
 
-    if (stage === "sessionId") {
-      setScannedSessionId(results[0] ?? "");
-      setStage("partNumber");
-      setStatus("Session ID captured. Now frame the Part Number.");
-      scheduleNextLabelScan();
-      return;
-    }
-
-    if (stage === "partNumber") {
-      setScannedPartNumber(results[0] ?? "");
-      setStage("firstBoxCodes");
-      setStatus("Part Number captured. Now frame the First Box's 2D Code column.");
-      scheduleNextLabelScan();
-      return;
-    }
-
-    if (stage === "firstBoxCodes") {
+    // The photo is captured silently for image storage/audit — it's never
+    // shown in the review UI, just the scanned values (same as Session ID /
+    // Part Number).
+    if (stage === "firstBoxCodes" || stage === "lastBoxCodes") {
       const file = await captureBoxPhoto();
-      setFirstBoxFile(file);
-      setFirstBoxPreviewUrl((current) => {
-        if (current) {
-          URL.revokeObjectURL(current);
-        }
 
-        return file ? URL.createObjectURL(file) : null;
-      });
-      setScannedFirstBoxCodes(results);
-      setStage("lastBoxCodes");
-      setStatus(
-        `First Box: found ${results.length} code${results.length === 1 ? "" : "s"}. Swap to the Last Box label and frame its 2D Code column.`,
-      );
-      scheduleNextLabelScan();
+      if (stage === "firstBoxCodes") {
+        setFirstBoxFile(file);
+      } else {
+        setLastBoxFile(file);
+      }
+    }
+
+    applyStageResult(stage, results);
+
+    if (isRescanOnlyRef.current) {
+      // Targeted rescan of a single field — no need to redo the whole
+      // 4-stage flow. Update just this field and drop straight back to
+      // review.
+      isRescanOnlyRef.current = false;
+      rescanStageRef.current = null;
+      setIsRescanMode(false);
+      stopCamera();
+      setIsReviewReady(true);
+      setStatus(`${LABEL_STAGE_CONFIG[stage].title} rescanned — review below.`);
       return;
     }
 
-    // lastBoxCodes — final stage.
-    const file = await captureBoxPhoto();
-    setLastBoxFile(file);
-    setLastBoxPreviewUrl((current) => {
-      if (current) {
-        URL.revokeObjectURL(current);
-      }
+    const nextIndex = LABEL_STAGE_SEQUENCE.indexOf(stage) + 1;
 
-      return file ? URL.createObjectURL(file) : null;
-    });
-    setScannedLastBoxCodes(results);
-    stopCamera();
-    setIsReviewReady(true);
-    setStatus("Scan complete. Review the details below and save the label session.");
+    if (nextIndex >= LABEL_STAGE_SEQUENCE.length) {
+      stopCamera();
+      setIsReviewReady(true);
+      setStatus("Scan complete. Review the details below and save the label session.");
+      return;
+    }
+
+    const nextStage = LABEL_STAGE_SEQUENCE[nextIndex];
+    setStage(nextStage);
+    setStatus(
+      `${LABEL_STAGE_CONFIG[stage].title} captured. Now: ${LABEL_STAGE_CONFIG[nextStage].hint}`,
+    );
+    scheduleNextLabelScan();
+  }
+
+  async function handleRescanField(stage: LabelWizardStage) {
+    setCameraError(null);
+    isRescanOnlyRef.current = true;
+    rescanStageRef.current = stage;
+    setIsRescanMode(true);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
+
+      stopCamera();
+      streamRef.current = stream;
+      setIsReviewReady(false);
+      setIsCameraOpen(true);
+      setCameraMode("label");
+      setStatus(`Rescanning ${LABEL_STAGE_CONFIG[stage].title}...`);
+    } catch {
+      isRescanOnlyRef.current = false;
+      rescanStageRef.current = null;
+      setIsRescanMode(false);
+      setIsReviewReady(true);
+      setCameraError("Camera access failed. Check browser permissions and try again.");
+    }
   }
 
   async function handleStartPartCamera() {
@@ -1065,8 +1100,16 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
               {isCameraOpen && cameraMode === "label" ? (
                 <div className="card" style={{ marginBottom: 16, padding: 16 }}>
                   <p className="muted" style={{ marginTop: 0 }}>
-                    Step {currentStageIndex + 1} of {LABEL_STAGE_SEQUENCE.length}:{" "}
-                    <strong>{LABEL_STAGE_CONFIG[labelStage].title}</strong>
+                    {isRescanMode ? (
+                      <>
+                        Rescanning: <strong>{LABEL_STAGE_CONFIG[labelStage].title}</strong>
+                      </>
+                    ) : (
+                      <>
+                        Step {currentStageIndex + 1} of {LABEL_STAGE_SEQUENCE.length}:{" "}
+                        <strong>{LABEL_STAGE_CONFIG[labelStage].title}</strong>
+                      </>
+                    )}
                   </p>
                   <div
                     className="label-camera-frame"
@@ -1125,7 +1168,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     </div>
                   </div>
                   <div className="button-row" style={{ marginTop: 14 }}>
-                    <button className="button secondary" type="button" onClick={stopCamera}>
+                    <button className="button secondary" type="button" onClick={handleCancelLabelScan}>
                       Cancel Scan
                     </button>
                   </div>
@@ -1140,7 +1183,16 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                   </p>
 
                   <div className="field">
-                    <label htmlFor="sessionIdCode">Session ID</label>
+                    <div className="split">
+                      <label htmlFor="sessionIdCode">Session ID</label>
+                      <button
+                        className="button ghost small"
+                        type="button"
+                        onClick={() => handleRescanField("sessionId")}
+                      >
+                        Rescan
+                      </button>
+                    </div>
                     <input
                       id="sessionIdCode"
                       type="text"
@@ -1154,7 +1206,16 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                   </div>
 
                   <div className="field">
-                    <label htmlFor="partNumber">Part Number</label>
+                    <div className="split">
+                      <label htmlFor="partNumber">Part Number</label>
+                      <button
+                        className="button ghost small"
+                        type="button"
+                        onClick={() => handleRescanField("partNumber")}
+                      >
+                        Rescan
+                      </button>
+                    </div>
                     <input
                       id="partNumber"
                       type="text"
@@ -1169,16 +1230,18 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
                   <div className="split" style={{ gap: 16, alignItems: "flex-start" }}>
                     <div style={{ flex: 1 }}>
-                      <p className="muted" style={{ marginBottom: 4 }}>
-                        <strong>First Box codes</strong> ({scannedFirstBoxCodes.length} found)
-                      </p>
-                      {firstBoxPreviewUrl ? (
-                        <img
-                          src={firstBoxPreviewUrl}
-                          alt="First Box label"
-                          style={{ width: "100%", borderRadius: 12, marginBottom: 8 }}
-                        />
-                      ) : null}
+                      <div className="split">
+                        <p className="muted" style={{ marginBottom: 4 }}>
+                          <strong>First Box codes</strong> ({scannedFirstBoxCodes.length} found)
+                        </p>
+                        <button
+                          className="button ghost small"
+                          type="button"
+                          onClick={() => handleRescanField("firstBoxCodes")}
+                        >
+                          Rescan
+                        </button>
+                      </div>
                       <div className="code-list">
                         {scannedFirstBoxCodes.map((code) => (
                           <div className="code-pill" key={code}>
@@ -1201,16 +1264,18 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     </div>
 
                     <div style={{ flex: 1 }}>
-                      <p className="muted" style={{ marginBottom: 4 }}>
-                        <strong>Last Box codes</strong> ({scannedLastBoxCodes.length} found)
-                      </p>
-                      {lastBoxPreviewUrl ? (
-                        <img
-                          src={lastBoxPreviewUrl}
-                          alt="Last Box label"
-                          style={{ width: "100%", borderRadius: 12, marginBottom: 8 }}
-                        />
-                      ) : null}
+                      <div className="split">
+                        <p className="muted" style={{ marginBottom: 4 }}>
+                          <strong>Last Box codes</strong> ({scannedLastBoxCodes.length} found)
+                        </p>
+                        <button
+                          className="button ghost small"
+                          type="button"
+                          onClick={() => handleRescanField("lastBoxCodes")}
+                        >
+                          Rescan
+                        </button>
+                      </div>
                       <div className="code-list">
                         {scannedLastBoxCodes.map((code) => (
                           <div className="code-pill" key={code}>
@@ -1239,7 +1304,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       type="button"
                       onClick={handleStartLabelCamera}
                     >
-                      Rescan
+                      Start Over (Rescan All)
                     </button>
                   </div>
                 </div>
