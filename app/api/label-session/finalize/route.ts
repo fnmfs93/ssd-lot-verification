@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth/session";
 import {
+  deleteLabelSessionPhotos,
+  getLabelSessionPhotos,
   getLabelSessionReportData,
   markReportSent,
   updateSessionRemarks,
@@ -54,6 +56,8 @@ export async function POST(request: Request) {
   }
 
   try {
+    const photos = await getLabelSessionPhotos(report.session.id);
+
     await sendVerificationReport({
       sessionIdCode: report.session.sessionIdCode ?? report.session.sessionKey,
       partNumber: report.session.partNumber ?? "-",
@@ -61,8 +65,14 @@ export async function POST(request: Request) {
       outcome: parsed.data.outcome,
       remarks: report.session.remarks ?? "",
       rows: buildReportRows(report.codes, report.verifications),
+      attachments: photos.map((photo) => ({
+        boxLabel: photo.boxLabel === "first" ? "first" : "last",
+        mimeType: photo.mimeType,
+        data: photo.data,
+      })),
     });
     await markReportSent(report.session.id, null);
+    await deleteLabelSessionPhotos(report.session.id);
     return NextResponse.json({ reportSent: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to send report email.";

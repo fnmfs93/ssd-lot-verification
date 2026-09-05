@@ -53,6 +53,22 @@ export const labelSessions = sqliteTable("label_sessions", {
     .default(sql`(unixepoch() * 1000)`),
 });
 
+// Holds the whole-label photos just long enough to attach them to the
+// report email — deleted once a report send succeeds (see
+// deleteLabelSessionPhotos). Not meant as permanent image storage.
+export const labelSessionPhotos = sqliteTable("label_session_photos", {
+  id: text("id").primaryKey(),
+  labelSessionId: text("label_session_id")
+    .notNull()
+    .references(() => labelSessions.id, { onDelete: "cascade" }),
+  boxLabel: text("box_label").notNull(),
+  mimeType: text("mime_type").notNull(),
+  data: text("data").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
 export const labelCodes = sqliteTable("label_codes", {
   id: text("id").primaryKey(),
   labelSessionId: text("label_session_id")

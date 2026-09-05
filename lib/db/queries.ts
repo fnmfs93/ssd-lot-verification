@@ -4,6 +4,7 @@ import { getDb } from "@/lib/db/client";
 import {
   auditLog,
   labelCodes,
+  labelSessionPhotos,
   labelSessions,
   partVerifications,
   sessions,
@@ -77,6 +78,12 @@ type LabelCodeInput = {
   serialIndex: number;
 };
 
+type LabelSessionPhotoInput = {
+  boxLabel: "first" | "last";
+  mimeType: string;
+  buffer: Buffer;
+};
+
 type LabelSessionInput = {
   qaUserId: string;
   qaUserName: string;
@@ -88,6 +95,7 @@ type LabelSessionInput = {
   lastBoxImageRef: string;
   rawOcrText: string;
   codes: LabelCodeInput[];
+  photos: LabelSessionPhotoInput[];
 };
 
 export async function createLabelSession(input: LabelSessionInput) {
@@ -122,6 +130,15 @@ export async function createLabelSession(input: LabelSessionInput) {
         serialIndex: code.serialIndex,
       }),
     ),
+    ...input.photos.map((photo) =>
+      db.insert(labelSessionPhotos).values({
+        id: randomUUID(),
+        labelSessionId: id,
+        boxLabel: photo.boxLabel,
+        mimeType: photo.mimeType,
+        data: photo.buffer.toString("base64"),
+      }),
+    ),
     db.insert(auditLog).values({
       id: randomUUID(),
       actorUserId: input.qaUserId,
@@ -138,6 +155,23 @@ export async function createLabelSession(input: LabelSessionInput) {
   ]);
 
   return { id, sessionKey };
+}
+
+export async function getLabelSessionPhotos(labelSessionId: string) {
+  const db = getDb();
+  return db
+    .select({
+      boxLabel: labelSessionPhotos.boxLabel,
+      mimeType: labelSessionPhotos.mimeType,
+      data: labelSessionPhotos.data,
+    })
+    .from(labelSessionPhotos)
+    .where(eq(labelSessionPhotos.labelSessionId, labelSessionId));
+}
+
+export async function deleteLabelSessionPhotos(labelSessionId: string) {
+  const db = getDb();
+  await db.delete(labelSessionPhotos).where(eq(labelSessionPhotos.labelSessionId, labelSessionId));
 }
 
 export async function recordPartVerification(input: {

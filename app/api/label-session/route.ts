@@ -31,14 +31,8 @@ function parseCodeList(value: string) {
   return [...new Set(codes)];
 }
 
-function parseManualCodes(value: string) {
-  return [...new Set(value.toUpperCase().match(/\b[A-Z0-9]{11}\b/g) ?? [])];
-}
-
 function resolveBoxCodes(formData: FormData, prefix: "firstBox" | "lastBox") {
-  const clientCodes = parseCodeList(String(formData.get(`${prefix}Codes`) ?? "[]"));
-  const manualCodes = parseManualCodes(String(formData.get(`${prefix}ManualCodes`) ?? ""));
-  return clientCodes.length ? clientCodes : manualCodes;
+  return parseCodeList(String(formData.get(`${prefix}Codes`) ?? "[]"));
 }
 
 export async function POST(request: Request) {
@@ -92,8 +86,7 @@ export async function POST(request: Request) {
   if (!firstBoxCodes.length || !lastBoxCodes.length) {
     return NextResponse.json(
       {
-        error:
-          "Couldn't read the 2D codes for one of the boxes. Try scanning again, or paste the codes manually.",
+        error: "Couldn't read the 2D codes for one of the boxes. Try scanning again.",
         ocrPreview: rawOcrText.replace(/\s+/g, " ").slice(0, 500),
       },
       { status: 422 },
@@ -141,6 +134,13 @@ export async function POST(request: Request) {
       lastBoxImageRef: lastBoxStored.fileRef,
       rawOcrText,
       codes,
+      // Kept only long enough to attach to the report email, then deleted —
+      // storeLabelImage above is the (currently stub, non-functional)
+      // long-term archive.
+      photos: [
+        { boxLabel: "first", mimeType: firstBoxFile.type, buffer: firstBoxBuffer },
+        { boxLabel: "last", mimeType: lastBoxFile.type, buffer: lastBoxBuffer },
+      ],
     });
 
     return NextResponse.json({

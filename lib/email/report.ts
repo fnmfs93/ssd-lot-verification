@@ -7,6 +7,12 @@ export type ReportRow = {
   status: "MATCH" | "UNMATCH" | "PENDING";
 };
 
+export type ReportAttachment = {
+  boxLabel: "first" | "last";
+  mimeType: string;
+  data: string; // base64-encoded image bytes
+};
+
 export type ReportData = {
   sessionIdCode: string;
   partNumber: string;
@@ -14,6 +20,7 @@ export type ReportData = {
   outcome: "pass" | "fail";
   remarks: string;
   rows: ReportRow[];
+  attachments: ReportAttachment[];
 };
 
 export function buildReportRows(
@@ -116,8 +123,19 @@ function buildHtml(data: ReportData) {
         </thead>
         <tbody>${rows}</tbody>
       </table>
+      ${
+        data.attachments.length
+          ? `<p style="margin-top:16px;color:#555;">See attached First Box / Last Box label photos for visual verification.</p>`
+          : ""
+      }
     </div>
   `;
+}
+
+function extensionForMimeType(mimeType: string) {
+  if (mimeType === "image/png") return "png";
+  if (mimeType === "image/webp") return "webp";
+  return "jpg";
 }
 
 export async function sendVerificationReport(data: ReportData) {
@@ -135,5 +153,11 @@ export async function sendVerificationReport(data: ReportData) {
     to: recipients,
     subject: `[${subjectTag}] QA Barcode Verification - ${data.sessionIdCode}`,
     html: buildHtml(data),
+    attachments: data.attachments.map((attachment) => ({
+      filename: `${attachment.boxLabel === "first" ? "first-box" : "last-box"}-label.${extensionForMimeType(attachment.mimeType)}`,
+      content: attachment.data,
+      encoding: "base64",
+      contentType: attachment.mimeType,
+    })),
   });
 }
