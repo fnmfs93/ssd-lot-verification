@@ -24,9 +24,13 @@ export async function storeLabelImage(
   }
 
   const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+  // `||` on purpose, not `??`: an env var explicitly set to an empty string
+  // (as GOOGLE_DRIVE_ACCESS_TOKEN is in .env.local) is not null/undefined,
+  // so `??` would lock in that empty string and never fall through to the
+  // real auth methods below.
   const accessToken =
-    process.env.GOOGLE_DRIVE_ACCESS_TOKEN ??
-    (await getOAuthAccessToken().catch(() => null)) ??
+    process.env.GOOGLE_DRIVE_ACCESS_TOKEN ||
+    (await getOAuthAccessToken().catch(() => null)) ||
     (await getServiceAccountAccessToken().catch(() => null));
 
   if (!folderId || !accessToken) {

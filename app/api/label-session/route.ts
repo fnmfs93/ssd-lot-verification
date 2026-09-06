@@ -96,18 +96,20 @@ export async function POST(request: Request) {
   const firstBoxBuffer = Buffer.from(await firstBoxFile.arrayBuffer());
   const lastBoxBuffer = Buffer.from(await lastBoxFile.arrayBuffer());
 
+  // Drive is a best-effort long-term archive, not the critical path — the
+  // report email's photo attachments come from the separate DB-backed store
+  // regardless of whether this succeeds. A Drive outage (quota, expired
+  // token, etc.) should never block saving the verification itself.
+  const storeBoxImage = (file: File, buffer: Buffer) =>
+    storeLabelImage({ fileName: file.name, mimeType: file.type, buffer }).catch((error) => {
+      console.error("Google Drive upload failed, falling back to stub ref", error);
+      return { storageMode: "stub" as const, fileRef: `stub://${Date.now()}-${file.name}` };
+    });
+
   try {
     const [firstBoxStored, lastBoxStored] = await Promise.all([
-      storeLabelImage({
-        fileName: firstBoxFile.name,
-        mimeType: firstBoxFile.type,
-        buffer: firstBoxBuffer,
-      }),
-      storeLabelImage({
-        fileName: lastBoxFile.name,
-        mimeType: lastBoxFile.type,
-        buffer: lastBoxBuffer,
-      }),
+      storeBoxImage(firstBoxFile, firstBoxBuffer),
+      storeBoxImage(lastBoxFile, lastBoxBuffer),
     ]);
 
     const codes = [
