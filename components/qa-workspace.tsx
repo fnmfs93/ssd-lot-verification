@@ -140,6 +140,38 @@ type SessionState = {
 
 type ReportOutcome = "pass" | "fail";
 
+/**
+ * Crops a video region, upscales it, and runs jsQR against it — with a
+ * contrast-normalizing preprocessing pass to help pull the code out from
+ * glare on plastic-wrapped parts, which otherwise defeats jsQR's binarizer.
+ */
+function decodeQrInRegion(
+  video: HTMLVideoElement,
+  region: { left: number; top: number; width: number; height: number },
+  minWidth: number,
+) {
+  const canvas = captureVideoRegion(video, region, minWidth);
+
+  if (!canvas) {
+    return null;
+  }
+
+  preprocessForOcr(canvas);
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+
+  if (!context) {
+    return null;
+  }
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const result = jsQR(imageData.data, canvas.width, canvas.height, {
+    inversionAttempts: "attemptBoth",
+  });
+
+  return result?.data ?? null;
+}
+
 export function QaWorkspace({ user }: { user: AuthUser }) {
   const router = useRouter();
   const labelVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -763,32 +795,21 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
         // physical QR code (a few mm across) to a handful of pixels and
         // making it undecodable. Crop to the guide box instead (where the
         // user is already told to center the code) and upscale that crop,
-        // the same technique used for the label OCR scanning.
-        const region = {
+        // the same technique used for the label OCR scanning. Also try the
+        // whole frame at a lower resolution as a second attempt, in case
+        // the code isn't well-centered in the guide box or is larger than
+        // it — cheap enough to try both every tick.
+        const guideRegion = {
           left: video.videoWidth * PART_QR_GUIDE_REGION.left,
           top: video.videoHeight * PART_QR_GUIDE_REGION.top,
           width: video.videoWidth * PART_QR_GUIDE_REGION.width,
           height: video.videoHeight * PART_QR_GUIDE_REGION.height,
         };
+        const fullFrameRegion = { left: 0, top: 0, width: video.videoWidth, height: video.videoHeight };
 
-        const canvas = captureVideoRegion(video, region, 900);
-
-        if (!canvas) {
-          return null;
-        }
-
-        const context = canvas.getContext("2d", { willReadFrequently: true });
-
-        if (!context) {
-          return null;
-        }
-
-        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-        const result = jsQR(imageData.data, canvas.width, canvas.height, {
-          inversionAttempts: "attemptBoth",
-        });
-
-        return result?.data ?? null;
+        return (
+          decodeQrInRegion(video, guideRegion, 1200) ?? decodeQrInRegion(video, fullFrameRegion, 900)
+        );
       };
 
       const scanFrame = async () => {
