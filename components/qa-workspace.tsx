@@ -288,6 +288,79 @@ function decodeQrInRegion(
   }
 }
 
+/**
+ * Decodes a region of an already-captured, static canvas — used by the
+ * high-res "take a photo" flow, which needs to try several crop/contrast
+ * combinations against the *same* frozen frame rather than re-sampling a
+ * live video (which could give a slightly different frame each attempt).
+ */
+function decodeCanvasRegion(
+  sourceCanvas: HTMLCanvasElement,
+  region: { left: number; top: number; width: number; height: number } | null,
+  useContrastStretch: boolean,
+): { value: string | null; outcome: string; previewUrl: string } {
+  let crop = sourceCanvas;
+
+  if (region) {
+    crop = document.createElement("canvas");
+    crop.width = Math.max(1, Math.round(region.width));
+    crop.height = Math.max(1, Math.round(region.height));
+    const cropContext = crop.getContext("2d");
+    cropContext?.drawImage(
+      sourceCanvas,
+      region.left,
+      region.top,
+      region.width,
+      region.height,
+      0,
+      0,
+      crop.width,
+      crop.height,
+    );
+  }
+
+  const context = crop.getContext("2d", { willReadFrequently: true });
+
+  if (!context) {
+    return { value: null, outcome: "no canvas context", previewUrl: "" };
+  }
+
+  const imageData = context.getImageData(0, 0, crop.width, crop.height);
+  const { data, width, height } = imageData;
+  const luminances = new Uint8ClampedArray(width * height);
+
+  for (let pixel = 0, byteIndex = 0; byteIndex < data.length; pixel += 1, byteIndex += 4) {
+    luminances[pixel] =
+      data[byteIndex] * 0.299 + data[byteIndex + 1] * 0.587 + data[byteIndex + 2] * 0.114;
+  }
+
+  if (useContrastStretch) {
+    stretchContrast(luminances);
+  }
+
+  for (let pixel = 0, byteIndex = 0; byteIndex < data.length; pixel += 1, byteIndex += 4) {
+    data[byteIndex] = luminances[pixel];
+    data[byteIndex + 1] = luminances[pixel];
+    data[byteIndex + 2] = luminances[pixel];
+  }
+  context.putImageData(imageData, 0, 0);
+  const previewUrl = crop.toDataURL("image/png");
+
+  try {
+    const binaryBitmap = new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(luminances, width, height)));
+    const value = zxingReader.decode(binaryBitmap).getText();
+    return { value, outcome: `decoded: ${value}`, previewUrl };
+  } catch (error) {
+    const label =
+      error instanceof NotFoundException
+        ? "not found"
+        : error instanceof Error
+          ? `${error.constructor.name}: ${error.message}`
+          : String(error);
+    return { value: null, outcome: label, previewUrl };
+  }
+}
+
 export function QaWorkspace({ user }: { user: AuthUser }) {
   const router = useRouter();
   const labelVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -324,7 +397,11 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [isVerifying, setIsVerifying] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
-  const [cameraMode, setCameraMode] = useState<"label" | "part" | null>(null);
+  const [cameraMode, setCameraMode] = useState<"label" | "part" | "partPhoto" | null>(null);
+  const [isCapturingPartPhoto, setIsCapturingPartPhoto] = useState(false);
+  const [partPhotoAttempts, setPartPhotoAttempts] = useState<
+    { label: string; previewUrl: string; outcome: string }[]
+  >([]);
   const [labelStage, setLabelStage] = useState<LabelWizardStage>("sessionId");
   const [isRescanMode, setIsRescanMode] = useState(false);
   const [lastResult, setLastResult] = useState<VerificationRecord | null>(null);
@@ -867,6 +944,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setVerifyError(null);
     setPartScanDebugPreviewUrl(null);
     setPartScanDebugOutcome(null);
+    setPartPhotoAttempts([]);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -1005,6 +1083,111 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
         "Part camera access failed. Check browser permissions or use scanner gun/manual entry instead.",
       );
     }
+  }
+
+  // Alternative to the always-on live scan above: a deliberate "tap to
+  // capture" high-resolution still photo, then several decode attempts
+  // against that one frozen frame. Live video streams are often capped to a
+  // lower resolution than the camera's real photographic capability to
+  // sustain frame rate, and can catch a frame mid-motion-blur — a single
+  // high-res still with a moment to focus gives the decoder better source
+  // material for a small/hard-to-read code, at the cost of being a manual
+  // per-attempt action instead of continuous background scanning.
+  async function handleStartPartPhotoMode() {
+    if (!session) {
+      setVerifyError("Save a label session first before scanning part QR codes.");
+      return;
+    }
+
+    setCameraError(null);
+    setVerifyError(null);
+    setPartScanDebugPreviewUrl(null);
+    setPartScanDebugOutcome(null);
+    setPartPhotoAttempts([]);
+    stopCamera();
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 4096 },
+          height: { ideal: 2304 },
+        },
+        audio: false,
+      });
+
+      streamRef.current = stream;
+      setIsCameraOpen(true);
+      setCameraMode("partPhoto");
+      setStatus("High-res camera ready. Frame the code, hold very steady, then tap Capture Photo.");
+    } catch {
+      setCameraError(
+        "High-res camera access failed. Check browser permissions or use scanner gun/manual entry instead.",
+      );
+    }
+  }
+
+  async function handleCapturePartPhotoNow() {
+    const video = partVideoRef.current;
+
+    if (!video || isCapturingPartPhoto) {
+      return;
+    }
+
+    setIsCapturingPartPhoto(true);
+    setPartPhotoAttempts([]);
+    setStatus("Capturing and analyzing...");
+
+    const frame = await captureVideoFrame(video);
+
+    if (!frame) {
+      setCameraError("Unable to capture the photo. Try again.");
+      setIsCapturingPartPhoto(false);
+      return;
+    }
+
+    const guideRegion = {
+      left: frame.width * PART_QR_GUIDE_REGION.left,
+      top: frame.height * PART_QR_GUIDE_REGION.top,
+      width: frame.width * PART_QR_GUIDE_REGION.width,
+      height: frame.height * PART_QR_GUIDE_REGION.height,
+    };
+
+    // Try several crop/contrast combinations against the one frozen frame —
+    // affordable here since it's a one-off action, not a real-time loop.
+    const attempts: Array<{
+      label: string;
+      region: typeof guideRegion | null;
+      stretch: boolean;
+    }> = [
+      { label: "guide box, contrast-stretched", region: guideRegion, stretch: true },
+      { label: "guide box, raw", region: guideRegion, stretch: false },
+      { label: "full frame, contrast-stretched", region: null, stretch: true },
+      { label: "full frame, raw", region: null, stretch: false },
+    ];
+
+    const results: { label: string; previewUrl: string; outcome: string }[] = [];
+
+    for (const attempt of attempts) {
+      const result = decodeCanvasRegion(frame, attempt.region, attempt.stretch);
+      results.push({ label: attempt.label, previewUrl: result.previewUrl, outcome: result.outcome });
+
+      if (result.value) {
+        setPartPhotoAttempts(results);
+        setIsCapturingPartPhoto(false);
+
+        const detectedValue = result.value.trim().toUpperCase();
+        setPartScanValue(detectedValue);
+        stopCamera();
+        setStatus(`Decoded via ${attempt.label}. Verifying automatically...`);
+        await submitPartVerification(detectedValue);
+        return;
+      }
+    }
+
+    setPartPhotoAttempts(results);
+    setIsCapturingPartPhoto(false);
+    setStatus("Couldn't decode this photo. Reposition and retake, or use scanner gun/manual entry.");
   }
 
   async function submitPartVerification(scannedQrValue: string) {
@@ -1635,7 +1818,15 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                 >
                   Open Part QR Camera
                 </button>
-                {isCameraOpen && cameraMode === "part" ? (
+                <button
+                  className="button ghost"
+                  type="button"
+                  onClick={handleStartPartPhotoMode}
+                  disabled={!session || Boolean(reportOutcome)}
+                >
+                  Take High-Res Photo
+                </button>
+                {isCameraOpen && (cameraMode === "part" || cameraMode === "partPhoto") ? (
                   <button className="button secondary" type="button" onClick={stopCamera}>
                     Close Part Camera
                   </button>
@@ -1718,6 +1909,111 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     Small-code tip: fill as much of the frame as possible with the code,
                     avoid glare, and keep the phone very steady.
                   </p>
+                </div>
+              ) : null}
+
+              {isCameraOpen && cameraMode === "partPhoto" ? (
+                <div className="card" style={{ marginBottom: 16, padding: 16 }}>
+                  <div
+                    style={{
+                      position: "relative",
+                      width: "100%",
+                      minHeight: 240,
+                      maxHeight: 360,
+                      borderRadius: 18,
+                      overflow: "hidden",
+                      background: "#000",
+                    }}
+                  >
+                    <video
+                      ref={partVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                      }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: `${PART_QR_GUIDE_REGION.left * 100}%`,
+                        top: `${PART_QR_GUIDE_REGION.top * 100}%`,
+                        width: `${PART_QR_GUIDE_REGION.width * 100}%`,
+                        height: `${PART_QR_GUIDE_REGION.height * 100}%`,
+                        border: "3px dashed #4ade80",
+                        borderRadius: 12,
+                        boxSizing: "border-box",
+                        pointerEvents: "none",
+                      }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: 8,
+                        right: 8,
+                        bottom: 8,
+                        color: "#fff",
+                        background: "rgba(0, 0, 0, 0.6)",
+                        padding: "6px 10px",
+                        borderRadius: 8,
+                        fontSize: 12,
+                        lineHeight: 1.3,
+                        textAlign: "center",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      Center the code, hold steady, then tap Capture Photo
+                    </div>
+                  </div>
+                  <div className="button-row" style={{ marginTop: 14 }}>
+                    <button
+                      className="button"
+                      type="button"
+                      onClick={handleCapturePartPhotoNow}
+                      disabled={isCapturingPartPhoto}
+                    >
+                      {isCapturingPartPhoto ? "Analyzing..." : "Capture Photo"}
+                    </button>
+                  </div>
+                  <p className="muted" style={{ marginBottom: 0, marginTop: 8 }}>
+                    High-resolution mode: takes one still photo and tries several ways to
+                    read it. Give the camera a moment to focus before tapping Capture.
+                  </p>
+                </div>
+              ) : null}
+
+              {partPhotoAttempts.length ? (
+                <div style={{ marginBottom: 16 }}>
+                  <p className="muted" style={{ marginBottom: 4 }}>
+                    Photo attempt results ({partPhotoAttempts.length})
+                  </p>
+                  <div className="code-list">
+                    {partPhotoAttempts.map((attempt, index) => (
+                      <div className="code-pill" key={`${attempt.label}-${index}`}>
+                        <div className="split">
+                          <span>{attempt.label}</span>
+                          <small className={attempt.outcome.startsWith("decoded") ? "success-text" : ""}>
+                            {attempt.outcome}
+                          </small>
+                        </div>
+                        {attempt.previewUrl ? (
+                          <img
+                            src={attempt.previewUrl}
+                            alt={attempt.label}
+                            style={{
+                              maxWidth: 160,
+                              marginTop: 6,
+                              borderRadius: 8,
+                              border: "1px solid var(--line)",
+                            }}
+                          />
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ) : null}
 
