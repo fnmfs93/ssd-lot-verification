@@ -155,13 +155,23 @@ type ReportOutcome = "pass" | "fail";
 // this uses ZXing's multi-format reader instead, covering both.
 const zxingReader = new MultiFormatReader();
 zxingReader.setHints(
-  new Map([[DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX]]]),
+  new Map<DecodeHintType, unknown>([
+    [DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX]],
+    // Worth the extra CPU here — this runs at most a couple of times per
+    // second, not a continuous high-fps scan, so there's headroom to let it
+    // work harder on a marginal (small/glare-affected) code.
+    [DecodeHintType.TRY_HARDER, true],
+  ]),
 );
 
 /**
- * Crops a video region, upscales it, and decodes it — with a
- * contrast-normalizing preprocessing pass to help pull the code out from
- * glare on plastic-wrapped parts, which otherwise defeats the binarizer.
+ * Crops a video region, upscales it, and decodes it. Deliberately does NOT
+ * use the hard-threshold preprocessing the OCR path uses — ZXing's
+ * HybridBinarizer is already an adaptive *local* binarizer built to handle
+ * uneven lighting, and pre-committing pixels to pure black/white with a
+ * single global threshold first was found (via the live debug preview) to
+ * blow glare out into harsh solid-white blobs that swallow the code's quiet
+ * zone, actively working against it rather than helping.
  */
 function decodeQrInRegion(
   video: HTMLVideoElement,
@@ -175,9 +185,6 @@ function decodeQrInRegion(
     return null;
   }
 
-  preprocessForOcr(canvas);
-  onPreview?.(canvas);
-
   const context = canvas.getContext("2d", { willReadFrequently: true });
 
   if (!context) {
@@ -185,15 +192,16 @@ function decodeQrInRegion(
   }
 
   const { data, width, height } = context.getImageData(0, 0, canvas.width, canvas.height);
-
-  // preprocessForOcr already grayscales in place (R === G === B per pixel),
-  // so the red channel alone is already the luminance value ZXing wants —
-  // one byte per pixel, not raw RGBA.
   const luminances = new Uint8ClampedArray(width * height);
 
   for (let pixel = 0, byteIndex = 0; byteIndex < data.length; pixel += 1, byteIndex += 4) {
-    luminances[pixel] = data[byteIndex];
+    // Standard grayscale luminance from the raw RGBA data — continuous
+    // tone, left for HybridBinarizer to threshold adaptively itself.
+    luminances[pixel] =
+      data[byteIndex] * 0.299 + data[byteIndex + 1] * 0.587 + data[byteIndex + 2] * 0.114;
   }
+
+  onPreview?.(canvas);
 
   try {
     const binaryBitmap = new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(luminances, width, height)));
