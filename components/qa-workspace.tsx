@@ -173,6 +173,54 @@ zxingReader.setHints(
  * blow glare out into harsh solid-white blobs that swallow the code's quiet
  * zone, actively working against it rather than helping.
  */
+/**
+ * Percentile-based contrast stretch ("auto levels") — remaps the 2nd-98th
+ * percentile of observed luminance to the full 0-255 range. Unlike a fixed
+ * global threshold (which clipped glare into harsh solid-white blobs), this
+ * preserves continuous tone and just makes better use of the dynamic range
+ * that's actually present, ignoring a few outlier pixels (like a small
+ * glare spot) rather than letting them dominate the whole remap.
+ */
+function stretchContrast(luminances: Uint8ClampedArray) {
+  const histogram = new Uint32Array(256);
+
+  for (let index = 0; index < luminances.length; index += 1) {
+    histogram[luminances[index]] += 1;
+  }
+
+  const total = luminances.length;
+  const lowCut = total * 0.02;
+  const highCut = total * 0.02;
+
+  let low = 0;
+  let cumulative = 0;
+
+  for (; low < 255; low += 1) {
+    cumulative += histogram[low];
+    if (cumulative >= lowCut) break;
+  }
+
+  let high = 255;
+  cumulative = 0;
+
+  for (; high > 0; high -= 1) {
+    cumulative += histogram[high];
+    if (cumulative >= highCut) break;
+  }
+
+  const range = high - low;
+
+  if (range <= 0) {
+    return luminances;
+  }
+
+  for (let index = 0; index < luminances.length; index += 1) {
+    luminances[index] = ((luminances[index] - low) / range) * 255;
+  }
+
+  return luminances;
+}
+
 function decodeQrInRegion(
   video: HTMLVideoElement,
   region: { left: number; top: number; width: number; height: number },
@@ -192,16 +240,26 @@ function decodeQrInRegion(
     return null;
   }
 
-  const { data, width, height } = context.getImageData(0, 0, canvas.width, canvas.height);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data, width, height } = imageData;
   const luminances = new Uint8ClampedArray(width * height);
 
   for (let pixel = 0, byteIndex = 0; byteIndex < data.length; pixel += 1, byteIndex += 4) {
-    // Standard grayscale luminance from the raw RGBA data — continuous
-    // tone, left for HybridBinarizer to threshold adaptively itself.
+    // Standard grayscale luminance from the raw RGBA data.
     luminances[pixel] =
       data[byteIndex] * 0.299 + data[byteIndex + 1] * 0.587 + data[byteIndex + 2] * 0.114;
   }
 
+  stretchContrast(luminances);
+
+  // Write the stretched grayscale back so the debug preview shows exactly
+  // what gets analyzed, not the raw color frame.
+  for (let pixel = 0, byteIndex = 0; byteIndex < data.length; pixel += 1, byteIndex += 4) {
+    data[byteIndex] = luminances[pixel];
+    data[byteIndex + 1] = luminances[pixel];
+    data[byteIndex + 2] = luminances[pixel];
+  }
+  context.putImageData(imageData, 0, 0);
   onPreview?.(canvas);
 
   try {
