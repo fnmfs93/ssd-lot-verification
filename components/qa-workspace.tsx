@@ -1491,7 +1491,18 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     style={{
                       position: "relative",
                       width: "100%",
-                      aspectRatio: "16 / 9",
+                      // No fixed aspectRatio here on purpose — see the
+                      // comment on PART_QR_GUIDE_REGION's usage below. A
+                      // forced ratio that doesn't match the camera's real
+                      // stream shape makes object-fit: cover crop the
+                      // *displayed* video while our region-crop math still
+                      // operates on the full, uncropped intrinsic frame,
+                      // silently scanning the wrong pixels. Letting the
+                      // container's height auto-resolve from the video's
+                      // own intrinsic aspect ratio (width 100%, height
+                      // auto) keeps what's displayed and what's analyzed in
+                      // exact agreement, the same approach already used for
+                      // the label camera.
                       minHeight: 240,
                       maxHeight: 360,
                       borderRadius: 18,
