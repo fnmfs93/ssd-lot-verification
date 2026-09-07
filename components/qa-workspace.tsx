@@ -97,6 +97,12 @@ const LABEL_SCAN_MAX_ATTEMPTS = 25;
 // means discovery has plateaued, not that the exact result repeated once.
 const LABEL_SCAN_PLATEAU_ATTEMPTS = 3;
 
+// Matches the dashed guide box shown over the Part QR camera. Kept as a
+// fraction-of-video-dimensions constant (same technique as the label guide
+// regions above) so the jsQR fallback can actually crop to this region
+// instead of just showing it — see handleStartPartCamera.
+const PART_QR_GUIDE_REGION = { left: 0.15, top: 0.1, width: 0.7, height: 0.8 };
+
 const SESSION_ID_PATTERN = /^\d{8}-\d{4}$/;
 const PART_NUMBER_PATTERN = /^[A-Z]\d{3}-\d{6}$/;
 
@@ -731,30 +737,47 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       const nativeDetector = window.BarcodeDetector
         ? new window.BarcodeDetector({ formats: ["qr_code"] })
         : null;
-      const scanCanvas = document.createElement("canvas");
-      const scanContext = scanCanvas.getContext("2d", { willReadFrequently: true });
 
       const detectQrValue = async (video: HTMLVideoElement) => {
         if (nativeDetector) {
+          // The native API scans the full-resolution frame directly.
           const barcodes = await nativeDetector.detect(video);
           return barcodes.find((item) => item.rawValue?.trim())?.rawValue ?? null;
         }
 
-        if (!scanContext || !video.videoWidth || !video.videoHeight) {
+        if (!video.videoWidth || !video.videoHeight) {
           return null;
         }
 
-        const maxDimension = 720;
-        const scale = Math.min(1, maxDimension / Math.max(video.videoWidth, video.videoHeight));
-        const width = Math.max(1, Math.round(video.videoWidth * scale));
-        const height = Math.max(1, Math.round(video.videoHeight * scale));
+        // jsQR has no hardware acceleration, so scanning the whole frame
+        // used to mean downscaling it to 720px first — shrinking a small
+        // physical QR code (a few mm across) to a handful of pixels and
+        // making it undecodable. Crop to the guide box instead (where the
+        // user is already told to center the code) and upscale that crop,
+        // the same technique used for the label OCR scanning.
+        const region = {
+          left: video.videoWidth * PART_QR_GUIDE_REGION.left,
+          top: video.videoHeight * PART_QR_GUIDE_REGION.top,
+          width: video.videoWidth * PART_QR_GUIDE_REGION.width,
+          height: video.videoHeight * PART_QR_GUIDE_REGION.height,
+        };
 
-        scanCanvas.width = width;
-        scanCanvas.height = height;
-        scanContext.drawImage(video, 0, 0, width, height);
+        const canvas = captureVideoRegion(video, region, 900);
 
-        const imageData = scanContext.getImageData(0, 0, width, height);
-        const result = jsQR(imageData.data, width, height, { inversionAttempts: "attemptBoth" });
+        if (!canvas) {
+          return null;
+        }
+
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+
+        if (!context) {
+          return null;
+        }
+
+        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+        const result = jsQR(imageData.data, canvas.width, canvas.height, {
+          inversionAttempts: "attemptBoth",
+        });
 
         return result?.data ?? null;
       };
@@ -1460,12 +1483,13 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     <div
                       style={{
                         position: "absolute",
-                        left: "50%",
-                        top: "50%",
-                        transform: "translate(-50%, -50%)",
-                        width: "55%",
-                        aspectRatio: "1 / 1",
-                        maxWidth: "70%",
+                        // Matches PART_QR_GUIDE_REGION exactly — the jsQR
+                        // fallback crops to this same region, so what's
+                        // shown here is really what gets scanned.
+                        left: `${PART_QR_GUIDE_REGION.left * 100}%`,
+                        top: `${PART_QR_GUIDE_REGION.top * 100}%`,
+                        width: `${PART_QR_GUIDE_REGION.width * 100}%`,
+                        height: `${PART_QR_GUIDE_REGION.height * 100}%`,
                         border: "3px dashed #4ade80",
                         borderRadius: 12,
                         boxSizing: "border-box",
