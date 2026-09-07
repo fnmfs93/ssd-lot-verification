@@ -178,6 +178,7 @@ function decodeQrInRegion(
   region: { left: number; top: number; width: number; height: number },
   minWidth: number,
   onPreview?: (canvas: HTMLCanvasElement) => void,
+  onResult?: (outcome: string) => void,
 ) {
   const canvas = captureVideoRegion(video, region, minWidth);
 
@@ -205,8 +206,19 @@ function decodeQrInRegion(
 
   try {
     const binaryBitmap = new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(luminances, width, height)));
-    return zxingReader.decode(binaryBitmap).getText();
+    const value = zxingReader.decode(binaryBitmap).getText();
+    onResult?.(`decoded: ${value}`);
+    return value;
   } catch (error) {
+    const label =
+      error instanceof NotFoundException
+        ? "NotFoundException (no code located in this region)"
+        : error instanceof Error
+          ? `${error.constructor.name}: ${error.message}`
+          : String(error);
+
+    onResult?.(label);
+
     if (!(error instanceof NotFoundException)) {
       // Checksum/format errors etc. are still "not found" for our
       // purposes — only log genuinely unexpected failures.
@@ -248,6 +260,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   // (post-crop, post-contrast-pass) — lets us see what the decoder sees
   // instead of guessing about framing/quality from a live preview alone.
   const [partScanDebugPreviewUrl, setPartScanDebugPreviewUrl] = useState<string | null>(null);
+  const [partScanDebugOutcome, setPartScanDebugOutcome] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("Ready for a new label session.");
   const [isUploading, setIsUploading] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -795,6 +808,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     setCameraError(null);
     setVerifyError(null);
     setPartScanDebugPreviewUrl(null);
+    setPartScanDebugOutcome(null);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -871,21 +885,30 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
         };
         const fullFrameRegion = { left: 0, top: 0, width: video.videoWidth, height: video.videoHeight };
 
-        const showDebugPreview = (canvas: HTMLCanvasElement) => {
-          const now = Date.now();
+        const shouldUpdateDebug = Date.now() - partScanDebugLastUpdateRef.current >= 400;
+        const showDebugPreview = shouldUpdateDebug
+          ? (canvas: HTMLCanvasElement) => {
+              partScanDebugLastUpdateRef.current = Date.now();
+              setPartScanDebugPreviewUrl(canvas.toDataURL("image/png"));
+            }
+          : undefined;
 
-          if (now - partScanDebugLastUpdateRef.current < 400) {
-            return;
-          }
+        let guideOutcome = "";
+        let fullFrameOutcome = "";
 
-          partScanDebugLastUpdateRef.current = now;
-          setPartScanDebugPreviewUrl(canvas.toDataURL("image/png"));
-        };
+        const value =
+          decodeQrInRegion(video, guideRegion, 1200, showDebugPreview, (outcome) => {
+            guideOutcome = outcome;
+          }) ??
+          decodeQrInRegion(video, fullFrameRegion, 900, undefined, (outcome) => {
+            fullFrameOutcome = outcome;
+          });
 
-        return (
-          decodeQrInRegion(video, guideRegion, 1200, showDebugPreview) ??
-          decodeQrInRegion(video, fullFrameRegion, 900)
-        );
+        if (shouldUpdateDebug) {
+          setPartScanDebugOutcome(`guide box: ${guideOutcome}\nfull frame: ${fullFrameOutcome}`);
+        }
+
+        return value;
       };
 
       const scanFrame = async () => {
@@ -1655,6 +1678,20 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       background: "#000",
                     }}
                   />
+                  {partScanDebugOutcome ? (
+                    <pre
+                      className="mono"
+                      style={{
+                        marginTop: 8,
+                        fontSize: 11,
+                        whiteSpace: "pre-wrap",
+                        overflowWrap: "anywhere",
+                        color: "var(--muted)",
+                      }}
+                    >
+                      {partScanDebugOutcome}
+                    </pre>
+                  ) : null}
                 </div>
               ) : null}
 
