@@ -740,9 +740,18 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
       const detectQrValue = async (video: HTMLVideoElement) => {
         if (nativeDetector) {
-          // The native API scans the full-resolution frame directly.
-          const barcodes = await nativeDetector.detect(video);
-          return barcodes.find((item) => item.rawValue?.trim())?.rawValue ?? null;
+          try {
+            // The native API scans the full-resolution frame directly, so
+            // it doesn't need the crop/upscale trick below — it already
+            // sees far more detail than a software decoder would.
+            const barcodes = await nativeDetector.detect(video);
+            return barcodes.find((item) => item.rawValue?.trim())?.rawValue ?? null;
+          } catch {
+            // Some Android/Chrome versions have had flaky BarcodeDetector
+            // implementations that throw intermittently — fall through to
+            // the jsQR path below for this attempt instead of killing the
+            // whole scan session over one bad frame.
+          }
         }
 
         if (!video.videoWidth || !video.videoHeight) {
