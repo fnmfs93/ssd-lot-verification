@@ -167,6 +167,7 @@ function decodeQrInRegion(
   video: HTMLVideoElement,
   region: { left: number; top: number; width: number; height: number },
   minWidth: number,
+  onPreview?: (canvas: HTMLCanvasElement) => void,
 ) {
   const canvas = captureVideoRegion(video, region, minWidth);
 
@@ -175,6 +176,7 @@ function decodeQrInRegion(
   }
 
   preprocessForOcr(canvas);
+  onPreview?.(canvas);
 
   const context = canvas.getContext("2d", { willReadFrequently: true });
 
@@ -214,6 +216,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const partVideoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const scanLoopRef = useRef<number | null>(null);
+  const partScanDebugLastUpdateRef = useRef(0);
   const submitTimeoutRef = useRef<number | null>(null);
   const lastSubmittedValueRef = useRef<string>("");
 
@@ -233,6 +236,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  // Shows exactly what the last Part QR/Data Matrix decode attempt analyzed
+  // (post-crop, post-contrast-pass) — lets us see what the decoder sees
+  // instead of guessing about framing/quality from a live preview alone.
+  const [partScanDebugPreviewUrl, setPartScanDebugPreviewUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("Ready for a new label session.");
   const [isUploading, setIsUploading] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -779,6 +786,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     setCameraError(null);
     setVerifyError(null);
+    setPartScanDebugPreviewUrl(null);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -855,8 +863,20 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
         };
         const fullFrameRegion = { left: 0, top: 0, width: video.videoWidth, height: video.videoHeight };
 
+        const showDebugPreview = (canvas: HTMLCanvasElement) => {
+          const now = Date.now();
+
+          if (now - partScanDebugLastUpdateRef.current < 400) {
+            return;
+          }
+
+          partScanDebugLastUpdateRef.current = now;
+          setPartScanDebugPreviewUrl(canvas.toDataURL("image/png"));
+        };
+
         return (
-          decodeQrInRegion(video, guideRegion, 1200) ?? decodeQrInRegion(video, fullFrameRegion, 900)
+          decodeQrInRegion(video, guideRegion, 1200, showDebugPreview) ??
+          decodeQrInRegion(video, fullFrameRegion, 900)
         );
       };
 
@@ -1609,6 +1629,24 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     Small-code tip: fill as much of the frame as possible with the code,
                     avoid glare, and keep the phone very steady.
                   </p>
+                </div>
+              ) : null}
+
+              {partScanDebugPreviewUrl ? (
+                <div style={{ marginBottom: 16 }}>
+                  <p className="muted" style={{ marginBottom: 4 }}>
+                    Debug: what the decoder is actually analyzing (updates live)
+                  </p>
+                  <img
+                    src={partScanDebugPreviewUrl}
+                    alt="Analyzed crop"
+                    style={{
+                      maxWidth: 220,
+                      borderRadius: 12,
+                      border: "1px solid var(--line)",
+                      background: "#000",
+                    }}
+                  />
                 </div>
               ) : null}
 
