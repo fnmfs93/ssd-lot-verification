@@ -2,7 +2,15 @@
 
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import jsQR from "jsqr";
+import {
+  BarcodeFormat,
+  BinaryBitmap,
+  DecodeHintType,
+  HybridBinarizer,
+  MultiFormatReader,
+  NotFoundException,
+  RGBLuminanceSource,
+} from "@zxing/library";
 import type { AuthUser } from "@/lib/auth/session";
 import {
   extractCandidateCodes,
@@ -99,8 +107,8 @@ const LABEL_SCAN_PLATEAU_ATTEMPTS = 3;
 
 // Matches the dashed guide box shown over the Part QR camera. Kept as a
 // fraction-of-video-dimensions constant (same technique as the label guide
-// regions above) so the jsQR fallback can actually crop to this region
-// instead of just showing it — see handleStartPartCamera.
+// regions above) so the software-decoder fallback can actually crop to this
+// region instead of just showing it — see handleStartPartCamera.
 const PART_QR_GUIDE_REGION = { left: 0.15, top: 0.1, width: 0.7, height: 0.8 };
 
 const SESSION_ID_PATTERN = /^\d{8}-\d{4}$/;
@@ -140,10 +148,20 @@ type SessionState = {
 
 type ReportOutcome = "pass" | "fail";
 
+// Parts are marked with either a QR code or a Data Matrix code depending on
+// the label/line — visually similar at a glance (both are dense square
+// grids) but structurally different symbologies. A QR-only decoder (jsQR)
+// can never read a Data Matrix code no matter how good the image is, so
+// this uses ZXing's multi-format reader instead, covering both.
+const zxingReader = new MultiFormatReader();
+zxingReader.setHints(
+  new Map([[DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX]]]),
+);
+
 /**
- * Crops a video region, upscales it, and runs jsQR against it — with a
+ * Crops a video region, upscales it, and decodes it — with a
  * contrast-normalizing preprocessing pass to help pull the code out from
- * glare on plastic-wrapped parts, which otherwise defeats jsQR's binarizer.
+ * glare on plastic-wrapped parts, which otherwise defeats the binarizer.
  */
 function decodeQrInRegion(
   video: HTMLVideoElement,
@@ -164,12 +182,30 @@ function decodeQrInRegion(
     return null;
   }
 
-  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-  const result = jsQR(imageData.data, canvas.width, canvas.height, {
-    inversionAttempts: "attemptBoth",
-  });
+  const { data, width, height } = context.getImageData(0, 0, canvas.width, canvas.height);
 
-  return result?.data ?? null;
+  // preprocessForOcr already grayscales in place (R === G === B per pixel),
+  // so the red channel alone is already the luminance value ZXing wants —
+  // one byte per pixel, not raw RGBA.
+  const luminances = new Uint8ClampedArray(width * height);
+
+  for (let pixel = 0, byteIndex = 0; byteIndex < data.length; pixel += 1, byteIndex += 4) {
+    luminances[pixel] = data[byteIndex];
+  }
+
+  try {
+    const binaryBitmap = new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(luminances, width, height)));
+    return zxingReader.decode(binaryBitmap).getText();
+  } catch (error) {
+    if (!(error instanceof NotFoundException)) {
+      // Checksum/format errors etc. are still "not found" for our
+      // purposes — only log genuinely unexpected failures.
+      if (!(error instanceof Error) || !/checksum|format/i.test(error.message)) {
+        console.error("2D code decode error", error);
+      }
+    }
+    return null;
+  }
 }
 
 export function QaWorkspace({ user }: { user: AuthUser }) {
@@ -760,15 +796,26 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       setIsCameraOpen(true);
       setCameraMode("part");
       setStatus(
-        "Part camera ready. Move very close to the QR and keep steady. Small 2mm codes may still be unreliable on some phones.",
+        "Part camera ready. Move very close to the code and keep steady. Small 2mm codes may still be unreliable on some phones.",
       );
 
       // Prefer the native Shape Detection API where available (Chrome/Edge on
-      // Android); fall back to jsQR's canvas-based decoder for browsers that
-      // don't ship it at all, e.g. Safari/iOS.
-      const nativeDetector = window.BarcodeDetector
-        ? new window.BarcodeDetector({ formats: ["qr_code"] })
-        : null;
+      // Android); fall back to the ZXing-based decoder below for browsers
+      // that don't ship it at all, e.g. Safari/iOS. Parts are marked with
+      // either QR or Data Matrix codes depending on the line, so both need
+      // to be requested.
+      let nativeDetector: BarcodeDetectorLike | null = null;
+
+      try {
+        nativeDetector = window.BarcodeDetector
+          ? new window.BarcodeDetector({ formats: ["qr_code", "data_matrix"] })
+          : null;
+      } catch {
+        // Some browsers throw synchronously if asked for a format they
+        // don't support, rather than just ignoring it — fall back to the
+        // ZXing path entirely rather than letting this abort camera setup.
+        nativeDetector = null;
+      }
 
       const detectQrValue = async (video: HTMLVideoElement) => {
         if (nativeDetector) {
@@ -781,7 +828,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
           } catch {
             // Some Android/Chrome versions have had flaky BarcodeDetector
             // implementations that throw intermittently — fall through to
-            // the jsQR path below for this attempt instead of killing the
+            // the ZXing path below for this attempt instead of killing the
             // whole scan session over one bad frame.
           }
         }
@@ -790,10 +837,11 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
           return null;
         }
 
-        // jsQR has no hardware acceleration, so scanning the whole frame
-        // used to mean downscaling it to 720px first — shrinking a small
-        // physical QR code (a few mm across) to a handful of pixels and
-        // making it undecodable. Crop to the guide box instead (where the
+        // The software decoder has no hardware acceleration, so scanning
+        // the whole frame used to mean downscaling it to 720px first —
+        // shrinking a small physical code (a few mm across) to a handful of
+        // pixels and making it undecodable. Crop to the guide box instead
+        // (where the
         // user is already told to center the code) and upscale that crop,
         // the same technique used for the label OCR scanning. Also try the
         // whole frame at a lower resolution as a second attempt, in case
@@ -1524,9 +1572,10 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     <div
                       style={{
                         position: "absolute",
-                        // Matches PART_QR_GUIDE_REGION exactly — the jsQR
-                        // fallback crops to this same region, so what's
-                        // shown here is really what gets scanned.
+                        // Matches PART_QR_GUIDE_REGION exactly — the
+                        // software-decoder fallback crops to this same
+                        // region, so what's shown here is really what gets
+                        // scanned.
                         left: `${PART_QR_GUIDE_REGION.left * 100}%`,
                         top: `${PART_QR_GUIDE_REGION.top * 100}%`,
                         width: `${PART_QR_GUIDE_REGION.width * 100}%`,
@@ -1557,7 +1606,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                     </div>
                   </div>
                   <p className="muted" style={{ marginBottom: 0 }}>
-                    Small-code tip: fill as much of the frame as possible with the QR,
+                    Small-code tip: fill as much of the frame as possible with the code,
                     avoid glare, and keep the phone very steady.
                   </p>
                 </div>
