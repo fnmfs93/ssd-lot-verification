@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   BarcodeFormat,
@@ -362,7 +361,6 @@ function decodeCanvasRegion(
 }
 
 export function QaWorkspace({ user }: { user: AuthUser }) {
-  const router = useRouter();
   const labelVideoRef = useRef<HTMLVideoElement | null>(null);
   const partVideoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -636,9 +634,8 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
   async function handleLogout() {
     stopCamera();
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.push("/login");
-    router.refresh();
+    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    window.location.assign("/login");
   }
 
   function resetLabelWizardState() {
@@ -1223,6 +1220,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     const response = await fetch("/api/part-verify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({
         sessionKey: session.sessionKey,
         scannedQrValue: normalizedValue,
@@ -1310,6 +1308,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     const response = await fetch("/api/label-session/finalize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({
         sessionKey: session.sessionKey,
         outcome: "fail",
@@ -1344,6 +1343,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
     const response = await fetch("/api/label-session/finalize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({
         sessionKey: session.sessionKey,
         outcome: reportOutcome,
@@ -1420,6 +1420,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
 
     const response = await fetch("/api/label-session", {
       method: "POST",
+      credentials: "same-origin",
       body: formData,
     });
 

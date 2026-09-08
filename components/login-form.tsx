@@ -1,16 +1,15 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { FormEvent, useState, useTransition } from "react";
+import { FormEvent, useState } from "react";
 
 export function LoginForm() {
-  const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
+  const [isPending, setIsPending] = useState(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    setIsPending(true);
 
     const formData = new FormData(event.currentTarget);
     const payload = {
@@ -22,6 +21,12 @@ export function LoginForm() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      // Explicit rather than relying on the "same-origin" default — some
+      // older/non-standard mobile browsers (seen on an industrial Android
+      // handheld) default fetch() credentials to "omit" instead, which
+      // silently drops the Set-Cookie response, making login look like it
+      // succeeds but never actually persisting the session.
+      credentials: "same-origin",
     });
 
     const data = (await response.json().catch(() => null)) as
@@ -30,13 +35,14 @@ export function LoginForm() {
 
     if (!response.ok) {
       setError(data?.error ?? "Unable to sign in.");
+      setIsPending(false);
       return;
     }
 
-    startTransition(() => {
-      router.push("/qa");
-      router.refresh();
-    });
+    // A full navigation rather than router.push()'s client-side RSC fetch —
+    // more robust on non-standard browsers where the soft-navigation fetch
+    // might not share the same cookie jar as a real page load.
+    window.location.assign("/qa");
   }
 
   return (
