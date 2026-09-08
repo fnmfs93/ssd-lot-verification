@@ -177,35 +177,6 @@ video {
   box-shadow: 0 0 0 4px rgba(31, 138, 70, 0.12);
 }
 
-.password-field {
-  position: relative;
-}
-
-.password-field input {
-  padding-right: 48px !important;
-}
-
-.password-toggle {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  border-radius: 10px;
-}
-
-.password-toggle:hover {
-  background: rgba(0, 0, 0, 0.05);
-}
-
 .button-row {
   display: flex;
   flex-wrap: wrap;

@@ -14,11 +14,18 @@ import { FormEvent, useState } from "react";
  * The onSubmit handler below is a progressive enhancement on top of that:
  * when JS does run, it intercepts the native submit and does a nicer
  * same-page JSON round-trip instead.
+ *
+ * The password field is deliberately left unmasked (type="text") rather
+ * than a maskable type="password" with a JS-driven show/hide toggle — on
+ * that same non-JS browser a toggle button can never respond (there's no
+ * way to swap an input's type via CSS alone), so it'd be dead UI exactly
+ * where it's needed most. This is a single shared internal QA credential
+ * on a dedicated handheld, not a public account, so trading masking away
+ * for "guaranteed to work everywhere" is the right call here.
  */
 export function LoginForm({ serverError }: { serverError?: string }) {
   const [error, setError] = useState<string | null>(serverError ?? null);
   const [isPending, setIsPending] = useState(false);
-  const [showPassword, setShowPassword] = useState(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -64,37 +71,16 @@ export function LoginForm({ serverError }: { serverError?: string }) {
 
       <div className="field">
         <label htmlFor="password">Password</label>
-        <div className="password-field">
-          <input
-            id="password"
-            name="password"
-            type={showPassword ? "text" : "password"}
-            autoComplete="current-password"
-            required
-          />
-          <button
-            type="button"
-            className="password-toggle"
-            onClick={() => setShowPassword((prev) => !prev)}
-            aria-label={showPassword ? "Hide password" : "Show password"}
-            aria-pressed={showPassword}
-            tabIndex={-1}
-          >
-            {showPassword ? (
-              // eye-off
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a18.6 18.6 0 0 1 5.06-5.94M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 8 11 8a18.6 18.6 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                <line x1="1" y1="1" x2="23" y2="23" />
-              </svg>
-            ) : (
-              // eye
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-            )}
-          </button>
-        </div>
+        <input
+          id="password"
+          name="password"
+          type="text"
+          autoComplete="current-password"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          required
+        />
       </div>
 
       <div className="button-row">
