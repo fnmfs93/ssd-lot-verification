@@ -385,6 +385,12 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  // Temporary diagnostic: OCR failures are normally swallowed silently in
+  // the scan loop (a single failed pass just retries next tick, which is
+  // right for a transient misread) — but that also means a *persistent*
+  // failure (e.g. the OCR worker itself never loading) looks identical to
+  // "still reading, nothing found yet" with zero visibility into why.
+  const [ocrDebugError, setOcrDebugError] = useState<string | null>(null);
   // Shows exactly what the last Part QR/Data Matrix decode attempt analyzed
   // (post-crop, post-contrast-pass) — lets us see what the decoder sees
   // instead of guessing about framing/quality from a live preview alone.
@@ -766,8 +772,13 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
       try {
         const text = await recognizeCanvas(regionCanvas);
         labelScanTextsRef.current.push(text);
-      } catch {
+        setOcrDebugError(null);
+      } catch (err) {
         // A single failed OCR pass isn't fatal — just try again next tick.
+        // Still record what happened so a *persistent* failure (e.g. the
+        // OCR worker never loading at all) is visible instead of looking
+        // identical to "still reading, nothing found yet."
+        setOcrDebugError(err instanceof Error ? `${err.name}: ${err.message}` : String(err));
       }
     }
 
@@ -1596,6 +1607,11 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
                       {LABEL_STAGE_CONFIG[labelStage].hint}
                     </div>
                   </div>
+                  {ocrDebugError ? (
+                    <p className="error" style={{ marginTop: 8 }}>
+                      OCR error: {ocrDebugError}
+                    </p>
+                  ) : null}
                   <div className="button-row" style={{ marginTop: 14 }}>
                     {LABEL_STAGE_CONFIG[labelStage].kind === "photo" ? (
                       <button
@@ -1775,6 +1791,7 @@ export function QaWorkspace({ user }: { user: AuthUser }) {
               </div>
             ) : null}
             {cameraError ? <p className="error">{cameraError}</p> : null}
+            {ocrDebugError ? <p className="error">OCR error: {ocrDebugError}</p> : null}
             <p className="muted">{status}</p>
 
             <div className="notice">
