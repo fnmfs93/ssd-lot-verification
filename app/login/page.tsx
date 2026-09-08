@@ -2,12 +2,18 @@ import { redirect } from "next/navigation";
 import { LoginForm } from "@/components/login-form";
 import { getCurrentUser } from "@/lib/auth/session";
 
-export default async function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
   const user = await getCurrentUser();
 
   if (user) {
     redirect("/qa");
   }
+
+  const { error } = await searchParams;
 
   return (
     <main className="shell">
@@ -27,7 +33,7 @@ export default async function LoginPage() {
             This starter uses internal email and password authentication backed
             by the app database so each verification stays traceable.
           </p>
-          <LoginForm />
+          <LoginForm serverError={error} />
         </div>
 
         <div className="stack">

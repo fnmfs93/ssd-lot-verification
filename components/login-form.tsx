@@ -2,8 +2,21 @@
 
 import { FormEvent, useState } from "react";
 
-export function LoginForm() {
-  const [error, setError] = useState<string | null>(null);
+/**
+ * Submits to /api/auth/login-form with method="post" by default — a plain
+ * HTML form that works with zero JavaScript (server validates, sets the
+ * session cookie, and 303-redirects to /qa or back to /login?error=...).
+ *
+ * This matters because at least one real device in the field (an industrial
+ * Android handheld's built-in browser) doesn't run this page's JS at all —
+ * its onSubmit never fired, so the form fell through to a native GET
+ * submit, which put the password in the URL and lost the login entirely.
+ * The onSubmit handler below is a progressive enhancement on top of that:
+ * when JS does run, it intercepts the native submit and does a nicer
+ * same-page JSON round-trip instead.
+ */
+export function LoginForm({ serverError }: { serverError?: string }) {
+  const [error, setError] = useState<string | null>(serverError ?? null);
   const [isPending, setIsPending] = useState(false);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -21,11 +34,6 @@ export function LoginForm() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      // Explicit rather than relying on the "same-origin" default — some
-      // older/non-standard mobile browsers (seen on an industrial Android
-      // handheld) default fetch() credentials to "omit" instead, which
-      // silently drops the Set-Cookie response, making login look like it
-      // succeeds but never actually persisting the session.
       credentials: "same-origin",
     });
 
@@ -39,14 +47,15 @@ export function LoginForm() {
       return;
     }
 
-    // A full navigation rather than router.push()'s client-side RSC fetch —
-    // more robust on non-standard browsers where the soft-navigation fetch
-    // might not share the same cookie jar as a real page load.
     window.location.assign("/qa");
   }
 
   return (
-    <form onSubmit={handleSubmit}>
+    <form
+      method="post"
+      action="/api/auth/login-form"
+      onSubmit={handleSubmit}
+    >
       <div className="field">
         <label htmlFor="email">Email</label>
         <input id="email" name="email" type="email" autoComplete="email" required />
